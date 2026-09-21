@@ -125,8 +125,44 @@ def top_row_share(
 
 
 @dataclass(frozen=True)
+class TensorMeasurement:
+    """Raw measurements of one tensor's delta B - A, independent of floor and control.
+
+    This is what the metrics cache stores; ``assess_tensor`` derives everything else.
+    """
+
+    shape: tuple[int, ...]
+    dtype_a: str  # stored dtypes: they set the rounding floor
+    dtype_b: str
+    norm_a: float
+    norm_b: float
+    abs_delta: float  # ||B - A||_F
+    erank: float | None  # entropy effective rank of B - A (matrices only)
+    erank_random: float | None  # same for a Gaussian matrix of this shape
+    r90: int | None
+    rank_dims: int | None  # min(rows, cols): the largest possible rank
+    top_row_share: float | None
+
+    @property
+    def rel_delta(self) -> float | None:
+        """||B - A|| / ||A||; 0.0 if both are zero; None if A is zero and B is not."""
+        if self.norm_a > 0.0:
+            return self.abs_delta / self.norm_a
+        return 0.0 if self.abs_delta == 0.0 else None
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["shape"] = list(self.shape)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TensorMeasurement:
+        return cls(**{**data, "shape": tuple(data["shape"])})
+
+
+@dataclass(frozen=True)
 class TensorMetrics:
-    """Everything measured about one tensor's delta B - A. All fields are JSON-safe."""
+    """A measurement plus its assessment (floor, control, status, labels). JSON-safe."""
 
     shape: tuple[int, ...]
     dtype_a: str
@@ -136,10 +172,10 @@ class TensorMetrics:
     abs_delta: float  # ||B - A||_F
     rel_delta: float | None  # ||B - A||_F / ||A||_F; None when ||A|| == 0
     from_zero: bool  # A is exactly zero and B is not
-    erank: float | None  # entropy effective rank of B - A (matrices only)
-    erank_random: float | None  # same for a Gaussian matrix of this shape
+    erank: float | None
+    erank_random: float | None
     r90: int | None
-    rank_dims: int | None  # min(rows, cols): the largest possible rank
+    rank_dims: int | None
     top_row_share: float | None
     floor: float  # dtype rounding floor on rel_delta
     control: float | None  # optional reference scale on rel_delta
@@ -156,19 +192,21 @@ class TensorMetrics:
         data["shape"] = list(self.shape)
         return data
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TensorMetrics:
+        return cls(**{**data, "shape": tuple(data["shape"])})
 
-def compute_tensor_metrics(
+
+def measure_tensor(
     a: np.ndarray,
     b: np.ndarray,
     dtype_a: str,
     dtype_b: str,
     *,
-    control: float | None = None,
     chunk_elements: int = DEFAULT_CHUNK_ELEMENTS,
-) -> TensorMetrics:
+) -> TensorMeasurement:
     """Measure the delta between two float32 tensors of the same shape.
 
-    ``dtype_a``/``dtype_b`` are the *stored* dtypes (they set the rounding floor).
     Raises ValueError for mismatched shapes or non-finite values.
     """
     if a.shape != b.shape:
@@ -180,9 +218,7 @@ def compute_tensor_metrics(
     ss_d = sum_squares(d, chunk_elements)
     if not all(math.isfinite(v) for v in (ss_a, ss_b, ss_d)):
         raise ValueError("tensor contains NaN or inf values")
-
-    norm_a, norm_b, abs_delta = math.sqrt(ss_a), math.sqrt(ss_b), math.sqrt(ss_d)
-    rel_delta = abs_delta / norm_a if norm_a > 0.0 else (0.0 if abs_delta == 0.0 else None)
+    abs_delta = math.sqrt(ss_d)
 
     erank = erank_random = None
     r90 = rank_dims = None
@@ -196,27 +232,58 @@ def compute_tensor_metrics(
             rank_dims = min(rows, cols)
             erank_random = random_erank_ratio(rank_dims, max(rows, cols)) * rank_dims
 
-    share = top_row_share(d, chunk_elements=chunk_elements) if abs_delta > 0.0 else None
-    n_rows = d.shape[0] if d.ndim >= 1 else 0
-    floor = noise.dtype_floor(dtype_a, dtype_b)
-
-    return TensorMetrics(
+    return TensorMeasurement(
         shape=tuple(int(s) for s in a.shape),
         dtype_a=dtype_a,
         dtype_b=dtype_b,
-        norm_a=norm_a,
-        norm_b=norm_b,
+        norm_a=math.sqrt(ss_a),
+        norm_b=math.sqrt(ss_b),
         abs_delta=abs_delta,
-        rel_delta=rel_delta,
-        from_zero=norm_a == 0.0 and abs_delta > 0.0,
         erank=erank,
         erank_random=erank_random,
         r90=r90,
         rank_dims=rank_dims,
-        top_row_share=share,
+        top_row_share=top_row_share(d, chunk_elements=chunk_elements) if abs_delta else None,
+    )
+
+
+def assess_tensor(m: TensorMeasurement, control: float | None = None) -> TensorMetrics:
+    """Apply the rounding floor, the optional control scale and the labels to a measurement."""
+    rel_delta = m.rel_delta
+    floor = noise.dtype_floor(m.dtype_a, m.dtype_b)
+    return TensorMetrics(
+        shape=m.shape,
+        dtype_a=m.dtype_a,
+        dtype_b=m.dtype_b,
+        norm_a=m.norm_a,
+        norm_b=m.norm_b,
+        abs_delta=m.abs_delta,
+        rel_delta=rel_delta,
+        from_zero=m.norm_a == 0.0 and m.abs_delta > 0.0,
+        erank=m.erank,
+        erank_random=m.erank_random,
+        r90=m.r90,
+        rank_dims=m.rank_dims,
+        top_row_share=m.top_row_share,
         floor=floor,
         control=control,
-        status=noise.assess(rel_delta, abs_delta, floor, control),
-        rank_label=noise.rank_label(erank, erank_random),
-        concentration_label=noise.concentration_label(share, n_rows),
+        status=noise.assess(rel_delta, m.abs_delta, floor, control),
+        rank_label=noise.rank_label(m.erank, m.erank_random),
+        concentration_label=noise.concentration_label(
+            m.top_row_share, m.shape[0] if m.shape else 0
+        ),
     )
+
+
+def compute_tensor_metrics(
+    a: np.ndarray,
+    b: np.ndarray,
+    dtype_a: str,
+    dtype_b: str,
+    *,
+    control: float | None = None,
+    chunk_elements: int = DEFAULT_CHUNK_ELEMENTS,
+) -> TensorMetrics:
+    """Measure and assess in one step (``measure_tensor`` + ``assess_tensor``)."""
+    measurement = measure_tensor(a, b, dtype_a, dtype_b, chunk_elements=chunk_elements)
+    return assess_tensor(measurement, control)
