@@ -22,6 +22,18 @@ def test_report_has_sections_in_order_is_offline_and_ranks_changes(make_checkpoi
     assert report.banner.startswith("The largest weight-matrix change is in")
     assert report.sig_cells > 0
     assert report.ranked_rows == len(base)  # every tensor moved 1%: all significant
+    # Two tables: weight matrices first, then vectors; rank labels only for matrices.
+    n_matrices = sum(t.ndim >= 2 for t in base.values())
+    assert report.table_rows["ranked-matrices"] == n_matrices
+    assert report.table_rows["ranked-vectors"] == len(base) - n_matrices
+    assert html.index('id="ranked-matrices"') < html.index('id="ranked-vectors"')
+    for table in ("ranked-matrices", "ranked-vectors"):
+        heads = report.table_heads[table]
+        assert "starting norm ||WA||" in heads and "absolute change ||ΔW||" in heads
+    assert "rank" in report.table_heads["ranked-matrices"]
+    assert "rank" not in report.table_heads["ranked-vectors"]
+    assert "effective rank" not in report.table_heads["ranked-vectors"]
+    assert report.table_rows["all-matrices"] + report.table_rows["all-vectors"] == len(base)
     assert report.external_refs == []
     assert report.forbidden_tags == []
 

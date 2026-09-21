@@ -121,6 +121,10 @@ class ReportParser(HTMLParser):
         self._section = ""
         self._details_depth = 0
         self._in_tbody = False
+        self.table_rows: dict[str, int] = {}  # rows per table id
+        self.table_heads: dict[str, list[str]] = {}  # header texts per table id
+        self._table = ""
+        self._in_th = False
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -140,6 +144,15 @@ class ReportParser(HTMLParser):
             self._details_depth += 1
         if tag == "tbody":
             self._in_tbody = True
+        if tag == "table":
+            self._table = a.get("id", "")
+            self.table_rows.setdefault(self._table, 0)
+            self.table_heads.setdefault(self._table, [])
+        if tag == "th":
+            self._in_th = True
+            self.table_heads.setdefault(self._table, []).append("")
+        if tag == "tr" and self._in_tbody:
+            self.table_rows[self._table] = self.table_rows.get(self._table, 0) + 1
         if tag == "tr" and self._in_tbody and self._section == "ranked" and not self._details_depth:
             self.ranked_rows += 1
 
@@ -150,10 +163,14 @@ class ReportParser(HTMLParser):
             self._details_depth -= 1
         if tag == "tbody":
             self._in_tbody = False
+        if tag == "th":
+            self._in_th = False
 
     def handle_data(self, data):
         if self._in_banner:
             self.banner += data
+        if self._in_th:
+            self.table_heads[self._table][-1] += data
 
 
 def parse_report(html: str) -> ReportParser:

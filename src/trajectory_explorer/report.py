@@ -229,44 +229,102 @@ def _sort_key(item: tuple[str, TensorMetrics]) -> tuple[int, float]:
     return (0, -m.abs_delta) if m.rel_delta is None else (1, -m.rel_delta)
 
 
-def _table(rows: list[tuple[str, TensorMetrics]]) -> str:
+def _num(value: float) -> str:
+    return f"{value:.3g}"
+
+
+def _name_cells(rank: int, name: str, m: TensorMetrics) -> str:
+    key = classify(name)
+    breakable = escape(name).replace(".", ".<wbr>")  # break long names at dots only
+    shape = escape(" x ".join(map(str, m.shape)))
+    return (
+        f'<td>{rank}</td><td class="name">{breakable}</td>'
+        f'<td>{escape(_where(key.layer, key.component))}</td><td class="nowrap">{shape}</td>'
+    )
+
+
+def _change_cells(m: TensorMetrics) -> str:
+    """Relative change, absolute change and the starting norm, so a tiny start is visible."""
+    return (
+        f'<td class="num">{pct(m.rel_delta)}</td><td class="num">{_num(m.abs_delta)}</td>'
+        f'<td class="num">{_num(m.norm_a)}</td>'
+    )
+
+
+_CHANGE_HEADS = (
+    '<th class="num">relative change</th><th class="num">absolute change ||&Delta;W||</th>'
+    '<th class="num">starting norm ||W<sub>A</sub>||</th>'
+)
+
+
+def _matrix_table(rows: list[tuple[str, TensorMetrics]], table_id: str) -> str:
     body = []
     for rank, (name, m) in enumerate(rows, start=1):
-        key = classify(name)
         erank = "&ndash;" if m.erank is None else f"{m.erank:.1f} of {m.rank_dims}"
-        breakable = escape(name).replace(".", ".<wbr>")  # break long names at dots only
-        shape = escape(" x ".join(map(str, m.shape)))
         body.append(
-            f'<tr class="{escape(m.status)}"><td>{rank}</td><td class="name">{breakable}</td>'
-            f"<td>{escape(_where(key.layer, key.component))}</td>"
-            f'<td class="nowrap">{shape}</td>'
-            f'<td class="num">{pct(m.rel_delta)}</td><td class="num">{erank}</td>'
+            f'<tr class="{escape(m.status)}">{_name_cells(rank, name, m)}{_change_cells(m)}'
+            f'<td class="num">{erank}</td>'
             f'<td class="num">{"&ndash;" if m.r90 is None else m.r90}</td>'
             f'<td class="nowrap">{escape(m.rank_label)}</td>'
             f'<td class="nowrap">{escape(m.concentration_label)}</td>'
             f'<td class="nowrap">{escape(STATUS_SHORT.get(m.status, m.status))}</td></tr>'
         )
     return (
-        "<table><thead><tr><th>#</th><th>tensor</th><th>where</th><th>shape</th>"
-        '<th class="num">relative change</th><th class="num">effective rank</th>'
-        '<th class="num">r90</th><th>rank</th><th>spread</th><th>status</th></tr></thead>'
+        f'<table id="{table_id}"><thead><tr><th>#</th><th>tensor</th><th>where</th>'
+        f"<th>shape</th>{_CHANGE_HEADS}"
+        '<th class="num">effective rank</th><th class="num">r90</th><th>rank</th>'
+        "<th>spread</th><th>status</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def _vector_table(rows: list[tuple[str, TensorMetrics]], table_id: str) -> str:
+    body = []
+    for rank, (name, m) in enumerate(rows, start=1):
+        share = "&ndash;" if m.top_row_share is None else pct(m.top_row_share)
+        body.append(
+            f'<tr class="{escape(m.status)}">{_name_cells(rank, name, m)}{_change_cells(m)}'
+            f'<td class="num">{share}</td>'
+            f'<td class="nowrap">{escape(STATUS_SHORT.get(m.status, m.status))}</td></tr>'
+        )
+    return (
+        f'<table id="{table_id}"><thead><tr><th>#</th><th>tensor</th><th>where</th>'
+        f"<th>length</th>{_CHANGE_HEADS}"
+        '<th class="num">top 5% of elements hold</th><th>status</th></tr></thead>'
         f"<tbody>{''.join(body)}</tbody></table>"
     )
 
 
 def render_ranked(result: DiffResult) -> str:
+    """Two tables, weight matrices first, then vectors (biases, norm scales), D42."""
+    if result.identical:
+        return "<p>The files are byte-identical, so no tensor was measured.</p>"
     ordered = sorted(result.tensors.items(), key=_sort_key)
-    significant = [(n, m) for n, m in ordered if m.significant]
-    if significant:
-        html = _table(significant)
-    elif result.identical:
-        html = "<p>The files are byte-identical, so no tensor was measured.</p>"
-    else:
-        html = "<p>No tensor changed by more than the noise floor.</p>"
-    if ordered:
+    matrices = [(n, m) for n, m in ordered if tensor_kind(m.shape) == "matrix"]
+    vectors = [(n, m) for n, m in ordered if tensor_kind(m.shape) == "vector"]
+    html = ""
+    for title, kind_rows, table, table_id, none_text in (
+        ("Weight matrices", matrices, _matrix_table, "ranked-matrices", "weight matrix"),
+        ("Vectors (biases, norm scales)", vectors, _vector_table, "ranked-vectors", "vector"),
+    ):
+        if not kind_rows:
+            continue
+        significant = [(n, m) for n, m in kind_rows if m.significant]
+        html += f"<h3>{title}</h3>"
+        html += (
+            table(significant, table_id)
+            if significant
+            else f"<p>No {none_text} changed by more than the noise floor.</p>"
+        )
+    full = ""
+    if matrices:
+        full += "<h3>Weight matrices</h3>" + _matrix_table(matrices, "all-matrices")
+    if vectors:
+        full += "<h3>Vectors</h3>" + _vector_table(vectors, "all-vectors")
+    if full:
         html += (
             f"<details><summary>All {len(ordered)} tensors, including those at or below the "
-            f"floor</summary>{_table(ordered)}</details>"
+            f"floor</summary>{full}</details>"
         )
     return html
 
@@ -468,6 +526,7 @@ td.nowrap { white-space: nowrap; }
 tr.below_floor td, tr.below_control td, tr.no_change td { color: var(--muted); }
 details { margin-top: 12px; } summary { cursor: pointer; color: var(--ink-2); }
 dt { font-weight: 600; margin-top: 8px; } dd { margin: 0 0 0 16px; color: var(--ink-2); }
+h3 { font-size: 14px; margin: 14px 0 6px; }
 footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 @media print {
   /* Always print the light palette, even when the viewer's OS is in dark mode. */
@@ -521,7 +580,9 @@ sums of squares. Hover a cell for exact numbers.</p>
 
 <section id="ranked">
 <h2>What moved most</h2>
-<p class="meta">Tensors above the noise floor, largest relative change first.</p>
+<p class="meta">Tensors above the noise floor, largest relative change first, weight matrices
+and vectors in separate tables. The starting norm shows when a big relative change comes from a
+tiny starting size.</p>
 <div class="scroll">$ranked</div>
 </section>
 
