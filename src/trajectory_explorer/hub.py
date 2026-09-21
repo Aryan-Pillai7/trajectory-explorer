@@ -159,6 +159,25 @@ def fetch_metadata(spec: HubSpec, *, timeout: float | None = None) -> RemoteFile
     return RemoteFile(spec=spec, size=size, sha256=sha)
 
 
+def list_branches(repo: str, *, timeout: float | None = None) -> list[str]:
+    """Branch names of a model repo (``GET /api/models/{repo}/refs``; verified, D37)."""
+    timeout = DEFAULT_TIMEOUT if timeout is None else timeout
+    try:
+        with _request(f"{endpoint()}/api/models/{repo}/refs", {}, timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403, 404):
+            raise InputError(
+                f"Repository {repo} was not found on the Hub, or it is private or gated "
+                "(set HF_TOKEN in .env for gated models)."
+            ) from None
+        raise InputError(f"The Hub returned HTTP {exc.code} listing branches of {repo}") from None
+    except (ValueError, TimeoutError) as exc:
+        raise InputError(f"Could not read the branch list of {repo}: {exc}") from None
+    branches = data.get("branches", []) if isinstance(data, dict) else []
+    return [b["name"] for b in branches if isinstance(b, dict) and isinstance(b.get("name"), str)]
+
+
 def download(
     remote: RemoteFile,
     dest: Path,

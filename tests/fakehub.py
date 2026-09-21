@@ -73,7 +73,9 @@ class FakeHub:
                 if hub.delay:
                     time.sleep(hub.delay)
                 parts = [unquote(p) for p in self.path.split("?")[0].strip("/").split("/")]
-                if role == "hub" and parts[:2] == ["api", "models"] and len(parts) == 6:
+                if role == "hub" and parts[:2] == ["api", "models"] and parts[4:] == ["refs"]:
+                    self._refs(f"{parts[2]}/{parts[3]}")
+                elif role == "hub" and parts[:2] == ["api", "models"] and len(parts) == 6:
                     self._tree(f"{parts[2]}/{parts[3]}", parts[5])
                 elif role == "hub" and len(parts) == 5 and parts[2] == "resolve":
                     self._resolve(f"{parts[0]}/{parts[1]}", parts[3], parts[4])
@@ -89,6 +91,16 @@ class FakeHub:
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def _refs(self, repo: str) -> None:
+                revisions = [rev for r, rev in [*hub.files, *hub.bin_only] if r == repo]
+                if not revisions:
+                    return self._json(401, {"error": "Invalid username or password."})
+                branches = [
+                    {"name": rev, "ref": f"refs/heads/{rev}", "targetCommit": "0" * 40}
+                    for rev in ["main", *revisions]
+                ]
+                self._json(200, {"tags": [], "branches": branches, "converts": []})
 
             def _tree(self, repo: str, revision: str) -> None:
                 known = {r for r, _ in hub.files} | {r for r, _ in hub.bin_only}

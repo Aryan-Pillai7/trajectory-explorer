@@ -365,15 +365,7 @@ confined to 200 rows of an embedding is <em>concentrated</em> (few rows) and als
 
 
 # -- page ---------------------------------------------------------------------------------
-_PAGE = Template("""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="trajectory-explorer $version">
-<title>$title</title>
-<style>
-:root {
+BASE_CSS = """:root {
   color-scheme: light;
   --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
   --hair: #e1e0d9; --border: rgba(11,11,11,0.10);
@@ -456,7 +448,17 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
   }
   .scroll { overflow: visible; }
 }
-</style>
+"""
+
+_PAGE = Template("""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="trajectory-explorer $version">
+<title>$title</title>
+<style>
+$css</style>
 </head>
 <body>
 <main>
@@ -520,6 +522,7 @@ def render_html(result: DiffResult) -> str:
         ranked=render_ranked(result),
         noise=render_noise_floor(result),
         labels=LABELS_HTML,
+        css=BASE_CSS,
         metrics_version=result.metrics_version,
         schema_version=result.schema_version,
     )

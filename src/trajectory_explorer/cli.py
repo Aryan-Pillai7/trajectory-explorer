@@ -7,6 +7,8 @@ Exit codes: 0 ok, 1 internal error, 2 bad arguments, 3 architecture mismatch,
 from __future__ import annotations
 
 import argparse
+import hashlib
+import itertools
 import logging
 import os
 import re
@@ -15,6 +17,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from trajectory_explorer import hub
 from trajectory_explorer._version import __version__
 from trajectory_explorer.diff import (
     CheckpointSource,
@@ -27,6 +30,14 @@ from trajectory_explorer.errors import InputError, TrajectoryExplorerError
 from trajectory_explorer.report import render_html, summary_sentence
 from trajectory_explorer.sources import HubSource, resolve
 from trajectory_explorer.store import DEFAULT_MAX_CHECKPOINTS, CheckpointStore
+from trajectory_explorer.trajectory import (
+    TrajectoryResult,
+    run_trajectory,
+    select_steps,
+    step_branches,
+)
+from trajectory_explorer.trajectory_report import render_trajectory_html
+from trajectory_explorer.trajectory_report import summary_sentence as trajectory_summary
 
 PROG = "trajectory-explorer"
 log = logging.getLogger("trajectory_explorer")
@@ -112,19 +123,13 @@ def _duration(seconds: float) -> str:
 
 
 def planned_downloads(
-    a: CheckpointSource,
-    b: CheckpointSource,
-    control: tuple[CheckpointSource, CheckpointSource] | None,
-    cache_dir: Path | None,
+    pairs: Sequence[tuple[CheckpointSource, CheckpointSource]], cache_dir: Path | None
 ) -> list[HubSource]:
-    """Hub files this diff will actually download, in the order the engine needs them."""
-    needed = files_needed(a, b, cache_dir)
-    if (
-        control
-        and a.info.sha256 != b.info.sha256
-        and control[0].info.sha256 != control[1].info.sha256
-    ):
-        needed += files_needed(control[0], control[1], cache_dir)
+    """Hub files these pairs will actually download, in the order the engine needs them.
+
+    Pairs that are metrics-cache hits need no files; byte-identical pairs need only A.
+    """
+    needed = [source for a, b in pairs for source in files_needed(a, b, cache_dir)]
     pending: list[HubSource] = []
     for source in needed:
         new = all(p.info.path != source.info.path for p in pending)
@@ -165,29 +170,128 @@ def download_guard(pending: list[HubSource], *, yes: bool) -> None:
 
 
 # -- commands -----------------------------------------------------------------------------
-def cmd_diff(args: argparse.Namespace) -> int:
-    store = CheckpointStore(
+def _cache_dir() -> Path | None:
+    return _data_dir() / "metrics" if "TE_DATA_DIR" in os.environ else None
+
+
+def _store(args: argparse.Namespace) -> CheckpointStore:
+    return CheckpointStore(
         _data_dir() / "checkpoints",
         args.max_checkpoints,
         announce=lambda message: print(message, file=sys.stderr),
     )
+
+
+def _write_outputs(args: argparse.Namespace, html: str, json_text: str, default: Path) -> None:
+    output = Path(args.output) if args.output else default
+    _write(output, html)
+    print(f"Report: {output}{_host_hint(output)}")
+    if args.json:
+        json_path = Path(args.json)
+        _write(json_path, json_text)
+        print(f"JSON:   {json_path}{_host_hint(json_path)}")
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    store = _store(args)
     a, b = resolve(args.a, store), resolve(args.b, store)
     control = None
     if args.control:
         control = (resolve(args.control[0], store), resolve(args.control[1], store))
-    cache_dir = _data_dir() / "metrics" if "TE_DATA_DIR" in os.environ else None
+    cache_dir = _cache_dir()
 
-    download_guard(planned_downloads(a, b, control, cache_dir), yes=args.yes)
+    pairs = [(a, b)]
+    if (
+        control
+        and a.info.sha256 != b.info.sha256
+        and control[0].info.sha256 != control[1].info.sha256
+    ):
+        pairs.append(control)  # the engine skips the control for an identical main pair
+    download_guard(planned_downloads(pairs, cache_dir), yes=args.yes)
     result = diff_checkpoints(a, b, DiffOptions(cache_dir=cache_dir, control=control))
 
-    output = Path(args.output) if args.output else default_report_path(result)
-    _write(output, render_html(result))
-    print(f"Report: {output}{_host_hint(output)}")
-    if args.json:
-        json_path = Path(args.json)
-        _write(json_path, result.to_json())
-        print(f"JSON:   {json_path}{_host_hint(json_path)}")
+    _write_outputs(args, render_html(result), result.to_json(), default_report_path(result))
     print(summary_sentence(result)[1])
+    return 0
+
+
+_REPO_ONLY = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
+
+
+def parse_steps(value: str) -> str | list[int]:
+    """'default', 'all', or a comma-separated list of step numbers."""
+    if value in ("default", "all"):
+        return value
+    try:
+        steps = [int(part) for part in value.split(",") if part.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected default, all or a list like 1000,2000,4000; got {value!r}"
+        ) from None
+    if len(steps) < 2:
+        raise argparse.ArgumentTypeError("a step list needs at least two steps")
+    return steps
+
+
+def _hub_trajectory_specs(repo: str, steps_arg: str | list[int]) -> list[str]:
+    available = step_branches(hub.list_branches(repo))
+    if not available:
+        raise InputError(
+            f"{repo} has no step branches (named stepN). Pass an explicit ordered list of "
+            f"checkpoints instead, e.g. trajectory-explorer trajectory {repo}@rev1 {repo}@rev2 ..."
+        )
+    if steps_arg == "all":
+        chosen = available
+    elif steps_arg == "default":
+        chosen = select_steps(available)
+    else:
+        missing = [s for s in steps_arg if s not in set(available)]
+        if missing:
+            raise InputError(
+                f"{repo} has no branch for step(s) {', '.join(map(str, missing))}. Available: "
+                f"{available[0]} ... {available[-1]} ({len(available)} step branches)."
+            )
+        chosen = sorted(set(steps_arg))
+    print(
+        f"Steps ({len(chosen)} of {len(available)} step branches): " + ", ".join(map(str, chosen)),
+        file=sys.stderr,
+    )
+    return [f"{repo}@step{s}" for s in chosen]
+
+
+def default_trajectory_path(result: TrajectoryResult) -> Path:
+    first, last = result.points[0], result.points[-1]
+    digest = hashlib.sha256("".join(p.sha256 for p in result.points).encode()).hexdigest()[:8]
+    name = (
+        f"trajectory_{_safe(first.label)}_to_{_safe(last.label)}_"
+        f"{len(result.points)}pts_{digest}.html"
+    )
+    return _data_dir() / "reports" / name
+
+
+def cmd_trajectory(args: argparse.Namespace) -> int:
+    specs: list[str] = args.specs
+    if len(specs) == 1:
+        (spec,) = specs
+        if Path(spec).exists() or not _REPO_ONLY.match(spec):
+            raise UsageError(
+                "A trajectory needs either org/name (to use the repo's step branches) or two "
+                f"or more checkpoints in order; got only {spec!r}."
+            )
+        specs = _hub_trajectory_specs(spec, args.steps or "default")
+    elif args.steps is not None:
+        raise UsageError("--steps only applies to the org/name form (a single repo argument).")
+
+    store = _store(args)
+    sources = [resolve(spec, store) for spec in specs]
+    cache_dir = _cache_dir()
+    pairs = list(itertools.pairwise(sources))
+    download_guard(planned_downloads(pairs, cache_dir), yes=args.yes)
+    result = run_trajectory(sources, cache_dir)
+
+    html = render_trajectory_html(result)
+    _write_outputs(args, html, result.to_json(), default_trajectory_path(result))
+    print(trajectory_summary(result)[1])
     return 0
 
 
@@ -219,12 +323,6 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("a", metavar="A", help="reference checkpoint (path or org/name@revision)")
     diff.add_argument("b", metavar="B", help="checkpoint to compare against A")
     diff.add_argument(
-        "-o",
-        "--output",
-        metavar="HTML",
-        help="report path (default: $TE_DATA_DIR/reports/diff_<A>_vs_<B>_<hashes>.html)",
-    )
-    diff.add_argument(
         "--control",
         metavar="A2:B2",
         type=parse_control,
@@ -232,13 +330,49 @@ def build_parser() -> argparse.ArgumentParser:
         "control's relative change are muted. Not a null: e.g. adjacent training "
         "checkpoints really differ.",
     )
-    diff.add_argument("--json", metavar="PATH", help="also write the raw result as JSON")
-    diff.add_argument(
+    _add_common_options(diff, "diff_<A>_vs_<B>_<hashes>.html")
+    diff.set_defaults(func=cmd_diff)
+
+    traj = sub.add_parser(
+        "trajectory",
+        help="diff each adjacent pair of an ordered list of checkpoints",
+        description=(
+            "Diff every adjacent pair (step i vs step i+1) of an ordered list of checkpoints "
+            "and write one report. Either pass a single repo, org/name, to use its step "
+            "branches (stepN; --steps picks which), or pass two or more checkpoints in order "
+            "(paths or org/name@revision). Adjacent-step diffs are a reference scale, not a "
+            "null: the model really learns between neighbouring checkpoints."
+        ),
+    )
+    traj.add_argument(
+        "specs", nargs="+", metavar="SPEC", help="org/name, or checkpoints in training order"
+    )
+    traj.add_argument(
+        "--steps",
+        type=parse_steps,
+        metavar="default|all|N,N,...",
+        help="with org/name: about 25 log-spaced step branches (default), every step branch "
+        "(all), or an explicit list such as 1000,2000,4000",
+    )
+    _add_common_options(traj, "trajectory_<first>_to_<last>_<n>pts_<hash>.html")
+    traj.set_defaults(func=cmd_trajectory)
+    return parser
+
+
+def _add_common_options(parser: argparse.ArgumentParser, default_name: str) -> None:
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="HTML",
+        help=f"report path (default: $TE_DATA_DIR/reports/{default_name})",
+    )
+    parser.add_argument("--json", metavar="PATH", help="also write the raw result as JSON")
+    parser.add_argument(
         "--yes",
         action="store_true",
         help=f"allow downloads over {GUARD_BYTES // 10**9} GB without asking",
     )
-    diff.add_argument(
+    parser.add_argument(
         "--max-checkpoints",
         metavar="N",
         type=_max_checkpoints,
@@ -246,11 +380,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="downloaded checkpoints kept on disk at once, least recently used evicted first "
         f"(default: {DEFAULT_MAX_CHECKPOINTS})",
     )
-    diff.add_argument(
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0, help="-v for progress, -vv for debug"
     )
-    diff.set_defaults(func=cmd_diff)
-    return parser
 
 
 def _configure_logging(verbosity: int) -> None:
