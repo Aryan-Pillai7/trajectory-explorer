@@ -119,7 +119,24 @@ def _bin(value: float, edges: list[float]) -> int:
     return N_BINS - 1
 
 
-def _cell_tooltip(g: GroupMetrics) -> str:
+def vector_share_lines(
+    g: GroupMetrics, tensors: dict[str, TensorMetrics] | None = None
+) -> list[str]:
+    """For vector cells: the top-5% share of each tensor (the number replaces the label, D43)."""
+    if g.kind != "vector" or not tensors:
+        return []
+    lines = []
+    for name in g.tensors:
+        m = tensors.get(name)
+        if m is not None and m.top_row_share is not None:
+            short = name.rsplit(".", 2)[-2] + "." + name.rsplit(".", 1)[-1]
+            lines.append(
+                f"{short}: top 5% of elements hold {pct(m.top_row_share)} of the squared change"
+            )
+    return lines
+
+
+def _cell_tooltip(g: GroupMetrics, tensors: dict[str, TensorMetrics] | None = None) -> str:
     lines = [
         f"{_where(g.layer, g.component)} ({g.kind})",
         f"relative change {pct(g.rel_delta)} (||dW||/||W|| = {sci(g.rel_delta)})",
@@ -129,6 +146,7 @@ def _cell_tooltip(g: GroupMetrics) -> str:
         lines.append(f"control scale {sci(g.control)}")
     lines.append(f"status: {STATUS_TEXT.get(g.status, g.status)}")
     lines.append(f"{len(g.tensors)} tensor(s): " + ", ".join(g.tensors))
+    lines.extend(vector_share_lines(g, tensors))
     return "\n".join(lines)
 
 
@@ -174,7 +192,7 @@ def render_heatmap(result: DiffResult) -> str:
             parts.append(
                 _CELL.substitute(
                     cls=cls,
-                    tip=escape(_cell_tooltip(g)),
+                    tip=escape(_cell_tooltip(g, result.tensors)),
                     x=x,
                     y=y,
                     w=_CELL_W,
@@ -453,8 +471,10 @@ under a quarter of what random noise of the same shape would have. Typical of fi
 targeted edits.</dd>
 <dt>dense</dt><dd>The change uses many directions, like random noise of the same shape would.</dd>
 <dt>concentrated</dt><dd>At least half of the change sits in the top 5% of rows (for an
-embedding: a small set of tokens).</dd>
-<dt>spread out</dt><dd>The change is distributed over many rows.</dd>
+embedding: a small set of tokens). Weight matrices only.</dd>
+<dt>spread out</dt><dd>The change is distributed over many rows. Weight matrices only; for
+vectors (biases, norm scales) the report shows the share of the change held by the top 5% of
+elements as a number instead of a label.</dd>
 <dt>from zero</dt><dd>The tensor was exactly zero in A (for example a bias at initialisation),
 so a relative change is undefined; any non-zero value in B counts as a real change.</dd>
 <dt>effective rank, r90</dt><dd>Effective rank is exp(entropy) of the normalised singular

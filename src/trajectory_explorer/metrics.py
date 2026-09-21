@@ -324,8 +324,9 @@ def assess_tensor(m: TensorMeasurement, control: float | None = None) -> TensorM
         control=control,
         status=noise.assess(rel_delta, m.abs_delta, floor, control),
         rank_label=noise.rank_label(m.erank, m.erank_random),
-        concentration_label=noise.concentration_label(
-            m.top_row_share, m.shape[0] if m.shape else 0
+        # Matrices only (D43): for vectors the top-5% share is shown as a number instead.
+        concentration_label=(
+            noise.concentration_label(m.top_row_share, m.shape[0]) if len(m.shape) >= 2 else "n/a"
         ),
         f16_rule=f16_rule,
         exact_f16_a=m.exact_f16_a,

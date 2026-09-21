@@ -29,6 +29,7 @@ from trajectory_explorer.report import (
     pct,
     precision_rule_note,
     sci,
+    vector_share_lines,
 )
 from trajectory_explorer.report import _legend as bin_legend
 from trajectory_explorer.trajectory import (
@@ -208,6 +209,9 @@ def render_heatmap(result: TrajectoryResult) -> str:
                 f"relative change {pct(g.rel_delta)} (||dW||/||W|| = {sci(g.rel_delta)})\n"
                 f"noise floor {sci(g.floor)}\nstatus: {reason}"
             )
+            shares = vector_share_lines(g, result.intervals[j].tensors)
+            if shares:
+                tip += "\n" + "\n".join(shares)
             parts.append(
                 f'<g class="cell {cls}"><title>{escape(tip)}</title><rect x="{x}" y="{y}" '
                 f'width="{_CELL_W}" height="{_CELL_H}" rx="2"{fill}/></g>'

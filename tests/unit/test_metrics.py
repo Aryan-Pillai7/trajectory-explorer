@@ -106,6 +106,34 @@ def test_concentration_labels(rng):
     spread = a + 0.1 * rng.standard_normal(a.shape).astype(np.float32)
     assert _metrics(a, spread).concentration_label == "spread"
 
+    # 1-D tensors (biases, norm scales) get no label, but keep the number (D43).
+    bias = rng.standard_normal(512).astype(np.float32)
+    one_element = bias.copy()
+    one_element[7] += 1.0
+    m = _metrics(bias, one_element)
+    assert m.concentration_label == "n/a"
+    assert m.top_row_share == pytest.approx(1.0)
+
+
+@pytest.mark.integration
+def test_vector_cells_show_the_top_share_as_a_number(make_checkpoint, rng):
+    from conftest import neox_tensors
+    from trajectory_explorer.diff import diff_checkpoints
+    from trajectory_explorer.report import render_heatmap
+
+    base = neox_tensors(rng)
+    moved = dict(base)
+    bias = "gpt_neox.layers.0.attention.dense.bias"
+    moved[bias] = base[bias].copy()
+    moved[bias][3] += 1.0  # all of the change in one element
+    result = diff_checkpoints(
+        make_checkpoint("a.safetensors", base), make_checkpoint("b.safetensors", moved)
+    )
+    assert result.tensors[bias].concentration_label == "n/a"
+    assert "dense.bias: top 5% of elements hold 100% of the squared change" in render_heatmap(
+        result
+    )
+
 
 @pytest.mark.unit
 def test_zero_reference_is_reported_without_nan_or_inf(rng):
