@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI uses the same docker compose commands as local development.
+env:
+  TE_DATA_DIR: ${{ github.workspace }}/../te-data
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare data dir
+        # The container runs as uid 1000; make the bind-mounted dir writable for it.
+        run: mkdir -p "$TE_DATA_DIR" && chmod 777 "$TE_DATA_DIR"
+      - name: Build dev image
+        run: docker compose build test
+      - name: Ruff (lint + format check)
+        run: docker compose run --rm lint
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare data dir
+        run: mkdir -p "$TE_DATA_DIR" && chmod 777 "$TE_DATA_DIR"
+      - name: Build images
+        run: docker compose build
+      - name: Tests (unit + integration; network tests are opt-in)
+        run: docker compose run --rm test
+      - name: CLI smoke test
+        run: docker compose run --rm te --version
