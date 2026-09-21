@@ -163,6 +163,23 @@ def parse_report(html: str) -> ReportParser:
     return parser
 
 
+@pytest.fixture
+def fake_hub(monkeypatch: pytest.MonkeyPatch):
+    """A local fake Hub; HF_ENDPOINT points at it, and no real token leaks into tests."""
+    from fakehub import FakeHub
+
+    hub = FakeHub()
+    monkeypatch.setenv("HF_ENDPOINT", hub.url)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    yield hub
+    hub.close()
+
+
+def checkpoint_bytes(tmp_path: Path, tensors: Mapping[str, TensorInput]) -> bytes:
+    """Serialize tensors to safetensors bytes (for serving from the fake Hub)."""
+    return write_safetensors(tmp_path / "serialized.safetensors", tensors).read_bytes()
+
+
 @pytest.fixture(autouse=True)
 def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point TE_DATA_DIR at a temp folder so no test writes to the real data dir on D:."""

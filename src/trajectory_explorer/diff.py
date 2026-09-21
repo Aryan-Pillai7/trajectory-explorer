@@ -1,7 +1,10 @@
 """Diff engine: two checkpoint files -> DiffResult (per tensor + per (layer, component) group).
 
-Flow: stream-hash both files -> byte-identical short-circuit -> raw measurements from the
-JSON cache or computed one tensor at a time -> floor/control/labels applied -> groups.
+Flow: content hashes (sha256 of local files, or the Hub's LFS sha256) -> byte-identical
+short-circuit -> raw measurements from the JSON cache or computed one tensor at a time ->
+floor/control/labels applied -> groups. Files are fetched only when a pair must actually be
+measured, and the compared pair is finished (and cached) before the control pair is fetched,
+so a two-file rolling store never has to re-read an evicted checkpoint.
 
 Only raw measurements are cached (keyed by sha256(A), sha256(B), METRICS_VERSION). The floor,
 the control scale and the labels are applied after loading, so a different --control never
@@ -17,9 +20,10 @@ import math
 import os
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from trajectory_explorer import metrics, noise
 from trajectory_explorer._version import __version__
@@ -38,10 +42,29 @@ _HASH_CHUNK = 4 * 1024 * 1024
 # -- data model ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SourceInfo:
-    label: str
-    path: str
+    label: str  # short name for titles, e.g. "step2000" or "pythia-70m@step2000"
+    path: str  # local path, or "org/name@revision" for Hub sources
     sha256: str
     size_bytes: int
+
+
+class CheckpointSource(Protocol):
+    """Anything with known content identity that can produce a local file on demand."""
+
+    info: SourceInfo
+
+    def fetch(self) -> AbstractContextManager[Path]:
+        """Yield a local path to the checkpoint, valid (and pinned) inside the with-block."""
+        ...
+
+
+@dataclass(frozen=True)
+class LocalSource:
+    path: Path
+    info: SourceInfo
+
+    def fetch(self) -> AbstractContextManager[Path]:
+        return nullcontext(self.path)
 
 
 @dataclass(frozen=True)
@@ -134,7 +157,8 @@ class DiffResult:
 @dataclass(frozen=True)
 class DiffOptions:
     cache_dir: Path | None = None  # None disables the metrics cache
-    control: tuple[Path, Path] | None = None  # reference-scale pair (not a null; see noise.py)
+    # Reference-scale pair (not a null; see noise.py): paths or CheckpointSources.
+    control: tuple[Any, Any] | None = None
 
 
 # -- hashing and cache --------------------------------------------------------------------
@@ -146,18 +170,36 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _source(path: Path) -> SourceInfo:
+def local_source(path: str | Path) -> LocalSource:
+    """Hash a local file (streaming) and describe it."""
+    path = Path(path)
     if not path.is_file():
         raise InputError(f"Checkpoint not found: {path}")
     start = time.perf_counter()
     sha = sha256_file(path)
     log.debug("sha256 %s = %s (%.2fs)", path, sha[:12], time.perf_counter() - start)
     label = path.parent.name if path.name == "model.safetensors" else path.stem
-    return SourceInfo(label=label, path=str(path), sha256=sha, size_bytes=path.stat().st_size)
+    info = SourceInfo(label=label, path=str(path), sha256=sha, size_bytes=path.stat().st_size)
+    return LocalSource(path, info)
+
+
+def _as_source(item: Any) -> CheckpointSource:
+    return local_source(item) if isinstance(item, str | Path) else item
 
 
 def cache_path(cache_dir: Path, sha_a: str, sha_b: str) -> Path:
     return cache_dir / f"{sha_a}_{sha_b}_m{metrics.METRICS_VERSION}.json"
+
+
+def files_needed(
+    a: CheckpointSource, b: CheckpointSource, cache_dir: Path | None
+) -> list[CheckpointSource]:
+    """Which of the two sources must be fetched to diff them (for download planning)."""
+    if a.info.sha256 == b.info.sha256:
+        return [a]  # identical: only A's header is read
+    if cache_dir is not None and _load_cache(cache_path(cache_dir, a.info.sha256, b.info.sha256)):
+        return []
+    return [a, b]
 
 
 def _load_cache(path: Path) -> tuple[dict[str, TensorMeasurement], list[str]] | None:
@@ -199,20 +241,29 @@ def _save_cache(
 
 # -- measurement --------------------------------------------------------------------------
 def _measure_pair(
-    a: SourceInfo, b: SourceInfo, cache_dir: Path | None
+    a: CheckpointSource, b: CheckpointSource, cache_dir: Path | None
 ) -> tuple[dict[str, TensorMeasurement], list[str]]:
-    """Raw measurements for every shared parameter, from the cache when possible."""
-    cpath = cache_path(cache_dir, a.sha256, b.sha256) if cache_dir else None
+    """Raw measurements for every shared parameter, from the cache when possible.
+
+    Only on a cache miss are the two files fetched (downloaded if needed); both stay pinned
+    until every tensor has been measured.
+    """
+    cpath = cache_path(cache_dir, a.info.sha256, b.info.sha256) if cache_dir else None
     if cpath is not None:
         cached = _load_cache(cpath)
         if cached is not None:
             log.info("Metrics cache hit: %s", cpath.name)
             return cached
-        log.info("Metrics cache miss: computing %s vs %s", a.label, b.label)
+        log.info("Metrics cache miss: computing %s vs %s", a.info.label, b.info.label)
 
-    start = time.perf_counter()
     measured: dict[str, TensorMeasurement] = {}
-    with Checkpoint(a.path) as ca, Checkpoint(b.path) as cb:
+    with (
+        a.fetch() as path_a,
+        b.fetch() as path_b,
+        Checkpoint(path_a) as ca,
+        Checkpoint(path_b) as cb,
+    ):
+        start = time.perf_counter()
         specs_a, specs_b = ca.specs(), cb.specs()
         names = check_compatible(specs_a, specs_b)
         skipped = sorted(set(parameter_specs(specs_a)[1]) | set(parameter_specs(specs_b)[1]))
@@ -227,7 +278,7 @@ def _measure_pair(
             log.debug("measured %s in %.2fs", name, time.perf_counter() - t)
     log.info("Measured %d tensors in %.1fs", len(measured), time.perf_counter() - start)
     if cpath is not None:
-        _save_cache(cpath, a.sha256, b.sha256, measured, skipped)
+        _save_cache(cpath, a.info.sha256, b.info.sha256, measured, skipped)
     return measured, skipped
 
 
@@ -270,9 +321,9 @@ def _group(
     return tuple(groups)
 
 
-def _identical_result(a: SourceInfo, b: SourceInfo, control: Any) -> DiffResult:
-    """Byte-identical files: build the grid from the header only; measure nothing."""
-    with Checkpoint(a.path) as ca:
+def _identical_result(a: CheckpointSource, b: SourceInfo, control: Any) -> DiffResult:
+    """Byte-identical files: build the grid from A's header only; measure nothing."""
+    with a.fetch() as path_a, Checkpoint(path_a) as ca:
         params, skipped = parameter_specs(ca.specs())
     buckets: dict[tuple[int | None, str], list[str]] = {}
     for name in params:
@@ -293,7 +344,7 @@ def _identical_result(a: SourceInfo, b: SourceInfo, control: Any) -> DiffResult:
         for (layer, component), names in buckets.items()
     )
     return DiffResult(
-        a=a,
+        a=a.info,
         b=b,
         identical=True,
         n_tensors=len(params),
@@ -325,34 +376,32 @@ def _check_control_matches(
 
 
 # -- public API ---------------------------------------------------------------------------
-def diff_checkpoints(
-    path_a: str | Path, path_b: str | Path, options: DiffOptions | None = None
-) -> DiffResult:
-    """Compare two same-architecture safetensors files. B is measured relative to A."""
-    options = options or DiffOptions()
-    a, b = _source(Path(path_a)), _source(Path(path_b))
+def diff_checkpoints(a: Any, b: Any, options: DiffOptions | None = None) -> DiffResult:
+    """Compare two same-architecture checkpoints. B is measured relative to A.
 
-    control_info = None
-    c_measured: dict[str, TensorMeasurement] = {}
+    ``a``, ``b`` and the control pair are local paths or CheckpointSources.
+    """
+    options = options or DiffOptions()
+    a, b = _as_source(a), _as_source(b)
+    control = tuple(_as_source(c) for c in options.control) if options.control else None
+    control_info = (control[0].info, control[1].info) if control else None
+
+    if a.info.sha256 == b.info.sha256:
+        log.info("Files are byte-identical (sha256 %s): no difference", a.info.sha256[:12])
+        return _identical_result(a, b.info, control_info)
+
+    # The compared pair first: measured and cached before any control file is fetched.
+    measured, skipped = _measure_pair(a, b, options.cache_dir)
+
     control_tensors: dict[str, float | None] = {}
     control_groups: dict[tuple[int | None, str], float | None] = {}
-    if options.control is not None:
-        ca, cb = _source(Path(options.control[0])), _source(Path(options.control[1]))
-        control_info = (ca, cb)
-        if ca.sha256 != cb.sha256:
-            c_measured, _ = _measure_pair(ca, cb, options.cache_dir)
-            control_tensors = {n: m.rel_delta for n, m in c_measured.items()}
-            for g in _group(c_measured, lambda _n: 0.0, lambda _l, _c: None):
-                control_groups[(g.layer, g.component)] = g.rel_delta
-        # A byte-identical control pair gives a zero reference scale: no extra muting.
-
-    if a.sha256 == b.sha256:
-        log.info("Files are byte-identical (sha256 %s): no difference", a.sha256[:12])
-        return _identical_result(a, b, control_info)
-
-    measured, skipped = _measure_pair(a, b, options.cache_dir)
-    if c_measured:
+    if control and control[0].info.sha256 != control[1].info.sha256:
+        c_measured, _ = _measure_pair(control[0], control[1], options.cache_dir)
         _check_control_matches(measured, c_measured)
+        control_tensors = {n: m.rel_delta for n, m in c_measured.items()}
+        for g in _group(c_measured, lambda _n: 0.0, lambda _l, _c: None):
+            control_groups[(g.layer, g.component)] = g.rel_delta
+    # A byte-identical control pair gives a zero reference scale: no extra muting.
 
     assessed = {n: assess_tensor(m, control_tensors.get(n)) for n, m in measured.items()}
     groups = _group(
@@ -361,8 +410,8 @@ def diff_checkpoints(
         lambda layer, component: control_groups.get((layer, component)),
     )
     return DiffResult(
-        a=a,
-        b=b,
+        a=a.info,
+        b=b.info,
         identical=False,
         n_tensors=len(assessed),
         skipped=tuple(skipped),
