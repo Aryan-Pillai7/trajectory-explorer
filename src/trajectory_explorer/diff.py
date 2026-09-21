@@ -170,16 +170,25 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# sha256 of local files already hashed in this process, keyed by (path, size, mtime_ns), so a
+# checkpoint used by several pairs (a trajectory, a control pair) is read for hashing once.
+_HASH_MEMO: dict[tuple[str, int, int], str] = {}
+
+
 def local_source(path: str | Path) -> LocalSource:
-    """Hash a local file (streaming) and describe it."""
+    """Hash a local file (streaming, memoized per run) and describe it."""
     path = Path(path)
     if not path.is_file():
         raise InputError(f"Checkpoint not found: {path}")
-    start = time.perf_counter()
-    sha = sha256_file(path)
-    log.debug("sha256 %s = %s (%.2fs)", path, sha[:12], time.perf_counter() - start)
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    sha = _HASH_MEMO.get(key)
+    if sha is None:
+        start = time.perf_counter()
+        sha = _HASH_MEMO[key] = sha256_file(path)
+        log.debug("sha256 %s = %s (%.2fs)", path, sha[:12], time.perf_counter() - start)
     label = path.parent.name if path.name == "model.safetensors" else path.stem
-    info = SourceInfo(label=label, path=str(path), sha256=sha, size_bytes=path.stat().st_size)
+    info = SourceInfo(label=label, path=str(path), sha256=sha, size_bytes=stat.st_size)
     return LocalSource(path, info)
 
 

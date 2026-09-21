@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import shutil
 from dataclasses import replace
 
@@ -61,6 +62,25 @@ def test_cache_hit_identical_shortcut_and_version_miss(
     monkeypatch.setattr(metrics, "METRICS_VERSION", metrics.METRICS_VERSION + 1)
     diff_checkpoints(a, b, opts)
     assert measure_calls["n"] == n
+
+
+@pytest.mark.integration
+def test_local_hashes_are_memoized_per_path_size_and_mtime(make_checkpoint, rng, monkeypatch):
+    from trajectory_explorer import diff
+
+    calls = []
+    real = diff.sha256_file
+    monkeypatch.setattr(diff, "sha256_file", lambda p: calls.append(p) or real(p))
+    path = make_checkpoint("a.safetensors", neox_tensors(rng))
+    first = diff.local_source(path).info.sha256
+    assert diff.local_source(path).info.sha256 == first and len(calls) == 1
+
+    # Rewritten later (same size). A rewrite inside the same filesystem clock tick would keep
+    # the mtime and reuse the old hash; within one CLI run files don't change, so we accept it.
+    before = path.stat().st_mtime_ns
+    make_checkpoint("a.safetensors", perturb(neox_tensors(rng), 0.01, rng))
+    os.utime(path, ns=(before + 10**9, before + 10**9))
+    assert diff.local_source(path).info.sha256 != first and len(calls) == 2
 
 
 @pytest.mark.integration
