@@ -61,4 +61,5 @@ services:
   format:
     <<: *dev
     pull_policy: never
-    entrypoint: ["sh", "-c", "ruff check --fix . && ruff format ."]
+    # Format first: it fixes long lines that would otherwise stop `check --fix`.
+    entrypoint: ["sh", "-c", "ruff format . && ruff check --fix ."]
