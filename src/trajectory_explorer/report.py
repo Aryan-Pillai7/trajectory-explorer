@@ -61,7 +61,10 @@ def pct(value: float | None) -> str:
         return "from 0"
     if value == 0.0:
         return "0%"
-    return f"{value * 100:.3g}%"
+    percent = value * 100
+    if percent >= 1000:  # no scientific notation for big changes: 4,030% rather than 4.03e+03%
+        return f"{percent:,.0f}%"
+    return f"{percent:.3g}%"
 
 
 def sci(value: float | None) -> str:

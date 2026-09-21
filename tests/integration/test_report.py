@@ -26,6 +26,16 @@ def test_report_has_sections_in_order_is_offline_and_ranks_changes(make_checkpoi
     assert report.forbidden_tags == []
 
 
+@pytest.mark.unit
+def test_percentages_never_use_scientific_notation_for_big_changes():
+    from trajectory_explorer.report import pct
+
+    assert pct(40.308) == "4,031%"  # the real pythia step1000 -> step143000 QKV cell
+    assert pct(283.26) == "28,326%"
+    assert pct(0.0123) == "1.23%"
+    assert pct(None) == "from 0"
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("null_pair", ["byte_identical", "float16_rounding_only"])
 def test_null_pairs_render_no_significant_difference(null_pair, make_checkpoint, rng, tmp_path):
