@@ -21,16 +21,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
-# Runtime dependencies are deliberately minimal; see decisions D2.
+# Runtime dependencies are deliberately minimal. The safetensors format is read by our own
+# small reader, so the safetensors library is only needed by the tests (as a reference).
 dependencies = [
     "numpy>=1.26",
-    "safetensors>=0.4.3",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9,<10",
     "ruff==0.16.8",
+    "safetensors>=0.4.3",
 ]
 
 [project.scripts]
