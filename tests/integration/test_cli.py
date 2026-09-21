@@ -35,7 +35,7 @@ def test_diff_end_to_end_writes_html_json_and_default_path(
     result = json.loads(js.read_text(encoding="utf-8"))
     assert result["b"]["label"] == "step2000"  # directory name labels model.safetensors
     printed = capsys.readouterr().out
-    assert f"Report: {out}" in printed and "The largest change is in" in printed
+    assert f"Report: {out}" in printed and "The largest weight-matrix change is in" in printed
 
     # Without -o the report goes to $TE_DATA_DIR/reports, and the metrics cache is used.
     assert run(["diff", str(a), str(b)]) == 0

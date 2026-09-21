@@ -19,7 +19,7 @@ def test_report_has_sections_in_order_is_offline_and_ranks_changes(make_checkpoi
     assert html.startswith("<!DOCTYPE html>")
     assert report.section_ids == ["heatmap", "ranked", "noise-floor", "labels"]
     assert html.index('id="summary"') < html.index('id="heatmap"')
-    assert report.banner.startswith("The largest change is in")
+    assert report.banner.startswith("The largest weight-matrix change is in")
     assert report.sig_cells > 0
     assert report.ranked_rows == len(base)  # every tensor moved 1%: all significant
     assert report.external_refs == []

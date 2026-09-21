@@ -135,28 +135,46 @@ def run_trajectory(
 
 
 # -- aggregation for the report -----------------------------------------------------------
-def row_keys(result: TrajectoryResult) -> list[tuple[int | None, str]]:
-    """(layer, component) rows: embedding first, then layer by layer, then the model head."""
-    keys = {(g.layer, g.component) for r in result.intervals for g in r.groups}
+VECTORS = "vectors"  # the line chart's single series for all 1-D tensors (D41)
+_KIND_ORDER = {"matrix": 0, "vector": 1}
+
+
+def row_keys(result: TrajectoryResult) -> list[tuple[int | None, str, str]]:
+    """(layer, component, kind) rows: embedding first, then each layer (its matrices, then its
+    vectors), then the model head."""
+    keys = {(g.layer, g.component, g.kind) for r in result.intervals for g in r.groups}
     order = {c: i for i, c in enumerate(COMPONENTS)}
-    head = sorted((k for k in keys if k[0] is None and k[1] != "embed"), key=lambda k: order[k[1]])
-    layers = sorted((k for k in keys if k[0] is not None), key=lambda k: (k[0], order[k[1]]))
-    return ([(None, "embed")] if (None, "embed") in keys else []) + layers + head
+
+    def sort_key(k: tuple[int | None, str, str]) -> tuple[int, int, int]:
+        return (-1 if k[0] is None else k[0], _KIND_ORDER[k[2]], order[k[1]])
+
+    embed = sorted((k for k in keys if k[0] is None and k[1] == "embed"), key=sort_key)
+    head = sorted((k for k in keys if k[0] is None and k[1] != "embed"), key=sort_key)
+    layers = sorted((k for k in keys if k[0] is not None), key=sort_key)
+    return embed + layers + head
 
 
 def component_series(result: TrajectoryResult) -> dict[str, list[float | None]]:
-    """Per component, the relative change of all its tensors together, per interval.
+    """Per matrix component, plus one series for all vectors, the relative change per interval.
 
-    sqrt(sum ||dW||^2) / sqrt(sum ||W||^2) over every layer's group of that component.
-    Byte-identical intervals count as 0.0; a component starting at exactly zero gives None.
+    sqrt(sum ||dW||^2) / sqrt(sum ||W||^2) over every layer's matrices of that component, and
+    over every vector (bias, norm scale) for the VECTORS series, so a tiny bias never drives
+    a matrix line (D41). Byte-identical intervals count as 0.0; a series starting at exactly
+    zero gives None.
     """
+    groups_all = [g for r in result.intervals for g in r.groups]
     present = [
-        c for c in COMPONENTS if any(g.component == c for r in result.intervals for g in r.groups)
+        c for c in COMPONENTS if any(g.component == c and g.kind == "matrix" for g in groups_all)
     ]
+    if any(g.kind == "vector" for g in groups_all):
+        present.append(VECTORS)
     series: dict[str, list[float | None]] = {c: [] for c in present}
     for interval in result.intervals:
         for comp in present:
-            groups = [g for g in interval.groups if g.component == comp]
+            if comp == VECTORS:
+                groups = [g for g in interval.groups if g.kind == "vector"]
+            else:
+                groups = [g for g in interval.groups if g.component == comp and g.kind == "matrix"]
             if interval.identical or not groups:
                 series[comp].append(0.0 if groups else None)
                 continue

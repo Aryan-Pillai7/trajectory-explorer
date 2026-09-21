@@ -67,9 +67,17 @@ class LocalSource:
         return nullcontext(self.path)
 
 
+def tensor_kind(shape: tuple[int, ...]) -> str:
+    """ "matrix" for 2-D and higher tensors, "vector" for biases and norm scales (D41)."""
+    return "matrix" if len(shape) >= 2 else "vector"
+
+
 @dataclass(frozen=True)
 class GroupMetrics:
-    """Aggregate over the tensors of one (layer, component) cell.
+    """Aggregate over the tensors of one (layer, component, kind) cell.
+
+    Matrices and vectors are never mixed (D41): a tiny bias with a huge relative change must
+    not make a cell look like it describes a weight matrix.
 
     rel_delta = sqrt(sum ||dW||^2) / sqrt(sum ||W_A||^2). The group floor is the rounding
     noise the members would show together: sqrt(sum (floor_i * ||W_A,i||)^2) / sqrt(sum
@@ -78,6 +86,7 @@ class GroupMetrics:
 
     layer: int | None
     component: str
+    kind: str  # "matrix" | "vector"
     tensors: tuple[str, ...]
     norm_a: float | None  # None when the files are byte-identical (nothing was measured)
     abs_delta: float
@@ -294,16 +303,17 @@ def _measure_pair(
 def _group(
     items: Mapping[str, Any],
     floor_of: Callable[[str], float],
-    control_of: Callable[[int | None, str], float | None],
+    control_of: Callable[[int | None, str, str], float | None],
 ) -> tuple[GroupMetrics, ...]:
-    """Aggregate measurements (or TensorMetrics) by (layer, component) via sums of squares."""
-    buckets: dict[tuple[int | None, str], list[str]] = {}
+    """Aggregate measurements (or TensorMetrics) by (layer, component, kind), sums of squares."""
+    buckets: dict[tuple[int | None, str, str], list[str]] = {}
     for name in items:
         key = classify(name)
-        buckets.setdefault((key.layer, key.component), []).append(name)
+        kind = tensor_kind(items[name].shape)
+        buckets.setdefault((key.layer, key.component, kind), []).append(name)
 
     groups = []
-    for (layer, component), names in buckets.items():
+    for (layer, component, kind), names in buckets.items():
         ss_a = sum(items[n].norm_a ** 2 for n in names)
         ss_d = sum(items[n].abs_delta ** 2 for n in names)
         abs_delta, norm_a = math.sqrt(ss_d), math.sqrt(ss_a)
@@ -313,11 +323,12 @@ def _group(
         else:
             rel = 0.0 if abs_delta == 0.0 else None
             floor = max(floor_of(n) for n in names)
-        control = control_of(layer, component)
+        control = control_of(layer, component, kind)
         groups.append(
             GroupMetrics(
                 layer=layer,
                 component=component,
+                kind=kind,
                 tensors=tuple(names),
                 norm_a=norm_a,
                 abs_delta=abs_delta,
@@ -334,14 +345,16 @@ def _identical_result(a: CheckpointSource, b: SourceInfo, control: Any) -> DiffR
     """Byte-identical files: build the grid from A's header only; measure nothing."""
     with a.fetch() as path_a, Checkpoint(path_a) as ca:
         params, skipped = parameter_specs(ca.specs())
-    buckets: dict[tuple[int | None, str], list[str]] = {}
+    buckets: dict[tuple[int | None, str, str], list[str]] = {}
     for name in params:
         key = classify(name)
-        buckets.setdefault((key.layer, key.component), []).append(name)
+        kind = tensor_kind(params[name].shape)
+        buckets.setdefault((key.layer, key.component, kind), []).append(name)
     groups = tuple(
         GroupMetrics(
             layer=layer,
             component=component,
+            kind=kind,
             tensors=tuple(names),
             norm_a=None,
             abs_delta=0.0,
@@ -350,7 +363,7 @@ def _identical_result(a: CheckpointSource, b: SourceInfo, control: Any) -> DiffR
             control=None,
             status=noise.NO_CHANGE,
         )
-        for (layer, component), names in buckets.items()
+        for (layer, component, kind), names in buckets.items()
     )
     return DiffResult(
         a=a.info,
@@ -403,20 +416,20 @@ def diff_checkpoints(a: Any, b: Any, options: DiffOptions | None = None) -> Diff
     measured, skipped = _measure_pair(a, b, options.cache_dir)
 
     control_tensors: dict[str, float | None] = {}
-    control_groups: dict[tuple[int | None, str], float | None] = {}
+    control_groups: dict[tuple[int | None, str, str], float | None] = {}
     if control and control[0].info.sha256 != control[1].info.sha256:
         c_measured, _ = _measure_pair(control[0], control[1], options.cache_dir)
         _check_control_matches(measured, c_measured)
         control_tensors = {n: m.rel_delta for n, m in c_measured.items()}
-        for g in _group(c_measured, lambda _n: 0.0, lambda _l, _c: None):
-            control_groups[(g.layer, g.component)] = g.rel_delta
+        for g in _group(c_measured, lambda _n: 0.0, lambda _l, _c, _k: None):
+            control_groups[(g.layer, g.component, g.kind)] = g.rel_delta
     # A byte-identical control pair gives a zero reference scale: no extra muting.
 
     assessed = {n: assess_tensor(m, control_tensors.get(n)) for n, m in measured.items()}
     groups = _group(
         assessed,
         lambda n: assessed[n].floor,
-        lambda layer, component: control_groups.get((layer, component)),
+        lambda layer, component, kind: control_groups.get((layer, component, kind)),
     )
     return DiffResult(
         a=a.info,

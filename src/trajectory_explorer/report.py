@@ -19,7 +19,7 @@ from string import Template
 from trajectory_explorer import noise
 from trajectory_explorer._version import __version__
 from trajectory_explorer.arch import COMPONENTS, classify
-from trajectory_explorer.diff import DiffResult, GroupMetrics
+from trajectory_explorer.diff import DiffResult, GroupMetrics, tensor_kind
 from trajectory_explorer.metrics import TensorMetrics
 
 N_BINS = 5
@@ -51,7 +51,7 @@ STATUS_SHORT = {
 }
 
 # Heatmap geometry (SVG user units).
-_LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP = 84, 28, 92, 34, 2
+_LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP = 120, 28, 92, 34, 2
 
 
 # -- formatting ---------------------------------------------------------------------------
@@ -77,18 +77,28 @@ def _where(layer: int | None, component: str) -> str:
 
 
 # -- heatmap ------------------------------------------------------------------------------
+KIND_PLURAL = {"matrix": "matrices", "vector": "vectors"}
+
+
 def _row_key(group: GroupMetrics) -> str:
+    """Heatmap row: the layer (or embed/final) and the tensor kind, never mixed (D41)."""
     if group.layer is not None:
-        return f"layer {group.layer}"
-    return "embed" if group.component == "embed" else "final"
+        base = f"layer {group.layer}"
+    else:
+        base = "embed" if group.component == "embed" else "final"
+    return f"{base} {KIND_PLURAL[group.kind]}"
 
 
 def _rows(groups: tuple[GroupMetrics, ...]) -> list[str]:
     keys = {_row_key(g) for g in groups}
-    layers = sorted(g.layer for g in groups if g.layer is not None)
-    ordered = ["embed"] if "embed" in keys else []
-    ordered += [f"layer {n}" for n in dict.fromkeys(layers)]
-    return ordered + (["final"] if "final" in keys else [])
+    layers = sorted(dict.fromkeys(g.layer for g in groups if g.layer is not None))
+    bases = ["embed", *[f"layer {n}" for n in layers], "final"]
+    return [
+        f"{base} {plural}"
+        for base in bases
+        for plural in ("matrices", "vectors")
+        if f"{base} {plural}" in keys
+    ]
 
 
 def _bin_edges(groups: tuple[GroupMetrics, ...]) -> list[float] | None:
@@ -111,7 +121,7 @@ def _bin(value: float, edges: list[float]) -> int:
 
 def _cell_tooltip(g: GroupMetrics) -> str:
     lines = [
-        _where(g.layer, g.component),
+        f"{_where(g.layer, g.component)} ({g.kind})",
         f"relative change {pct(g.rel_delta)} (||dW||/||W|| = {sci(g.rel_delta)})",
         f"noise floor {sci(g.floor)}",
     ]
@@ -281,21 +291,39 @@ def summary_sentence(result: DiffResult) -> tuple[bool, str]:
             f"No significant difference: all {n} tensors are at or below the noise floor "
             f"(largest relative change {pct(largest)})."
         )
-    # Prefer the largest real relative change; "from zero" only if nothing else moved.
-    candidates = [(g.layer, g.component, g.rel_delta) for g in result.groups if g.significant]
-    if not candidates:  # significant tensors inside groups that are below floor overall
+
+    # Matrices and vectors are reported separately (D41); within each, prefer the largest
+    # real relative change and fall back to "from zero" only if nothing else moved.
+    def largest(kind: str) -> str | None:
         candidates = [
-            (classify(n).layer, classify(n).component, result.tensors[n].rel_delta) for n in sig
+            (g.layer, g.component, g.rel_delta)
+            for g in result.groups
+            if g.significant and g.kind == kind
         ]
-    layer, component, rel = max(candidates, key=lambda c: (c[2] is not None, c[2] or 0.0))
-    what = (
-        f"{_where(layer, component)} moved away from zero"
-        if rel is None
-        else f"{_where(layer, component)} ({pct(rel)} relative change)"
-    )
+        if not candidates:  # significant tensors inside groups that are below floor overall
+            candidates = [
+                (classify(t).layer, classify(t).component, result.tensors[t].rel_delta)
+                for t in sig
+                if tensor_kind(result.tensors[t].shape) == kind
+            ]
+        if not candidates:
+            return None
+        layer, component, rel = max(candidates, key=lambda c: (c[2] is not None, c[2] or 0.0))
+        if rel is None:
+            return f"{_where(layer, component)} (moved away from zero)"
+        return f"{_where(layer, component)} ({pct(rel)})"
+
+    matrix, vector = largest("matrix"), largest("vector")
+    parts = []
+    if matrix:
+        parts.append(f"The largest weight-matrix change is in {matrix}")
+    if vector:
+        vec = f"the largest vector change (biases, norm scales) is in {vector}"
+        parts.append(vec if matrix else "Only vectors changed: " + vec)
     return True, (
-        f"The largest change is in {what}; {len(sig)} of {n} tensors changed more than the "
-        "noise floor" + (" and the control scale." if result.control else ".")
+        "; ".join(parts)
+        + f". {len(sig)} of {n} tensors changed more than the noise floor"
+        + (" and the control scale." if result.control else ".")
     )
 
 

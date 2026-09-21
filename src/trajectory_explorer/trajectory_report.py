@@ -31,7 +31,12 @@ from trajectory_explorer.report import (
     sci,
 )
 from trajectory_explorer.report import _legend as bin_legend
-from trajectory_explorer.trajectory import TrajectoryResult, component_series, row_keys
+from trajectory_explorer.trajectory import (
+    VECTORS,
+    TrajectoryResult,
+    component_series,
+    row_keys,
+)
 
 SERIES_LIGHT = [
     "#2a78d6",
@@ -87,14 +92,19 @@ svg.traj-heatmap { font-size: 11px; }
 )
 
 
-def _where(layer: int | None, component: str) -> str:
-    label = COMPONENT_LABELS.get(component, component)
-    return f"layer {layer} {label}" if layer is not None else label
+SERIES_LABELS = {**COMPONENT_LABELS, VECTORS: "all vectors"}
+MAX_SERIES = 7  # validated palette slots (dataviz validator, light and dark)
 
 
-def _row_label(layer: int | None, component: str) -> str:
+def _where(layer: int | None, component: str, kind: str | None = None) -> str:
     label = COMPONENT_LABELS.get(component, component)
-    return f"L{layer} {label}" if layer is not None else label
+    where = f"layer {layer} {label}" if layer is not None else label
+    return f"{where} ({kind})" if kind else where
+
+
+def _row_label(layer: int | None, component: str, kind: str) -> str:
+    label = COMPONENT_LABELS.get(component, component)
+    return (f"L{layer} {label}" if layer is not None else label) + f" ({kind})"
 
 
 # -- banner -------------------------------------------------------------------------------
@@ -108,26 +118,28 @@ def summary_sentence(result: TrajectoryResult) -> tuple[bool, str]:
             f"No significant change across the sampled steps: all {len(cells)} cells over "
             f"{len(result.intervals)} intervals are at or below the noise floor."
         )
-    best: dict[str, tuple[float, int, GroupMetrics]] = {}
+    best: dict[tuple[str, str], tuple[float, int, GroupMetrics]] = {}
     for i, g in sig:
         score = g.rel_delta if g.rel_delta is not None else -1.0  # from-zero ranks last
-        if g.component not in best or score > best[g.component][0]:
-            best[g.component] = (score, i, g)
-    ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)
-    (c1, (_, i1, g1)), rest = ranked[0], ranked[1:]
+        key = (g.component, g.kind)
+        if key not in best or score > best[key][0]:
+            best[key] = (score, i, g)
+    # Matrices first: a tiny vector with a huge relative change must not headline (D41).
+    ranked = sorted(best.items(), key=lambda kv: (kv[0][1] == "matrix", kv[1][0]), reverse=True)
+    ((c1, k1), (_, i1, g1)), rest = ranked[0], ranked[1:]
     change = "moved away from zero" if g1.rel_delta is None else f"{pct(g1.rel_delta)}"
     text = (
-        f"{COMPONENT_LABELS.get(c1, c1)} moved most (largest: {_where(g1.layer, g1.component)} "
-        f"in {unit} {labels[i1]}, {change})"
+        f"{COMPONENT_LABELS.get(c1, c1)} ({k1}) moved most (largest: "
+        f"{_where(g1.layer, g1.component, g1.kind)} in {unit} {labels[i1]}, {change})"
     )
     if rest:
-        c2, (_, i2, _g2) = rest[0]
-        text += f", followed by {COMPONENT_LABELS.get(c2, c2)} (peak in {unit} {labels[i2]})"
+        (c2, k2), (_, i2, _g2) = rest[0]
+        text += f", followed by {COMPONENT_LABELS.get(c2, c2)} ({k2}) (peak in {unit} {labels[i2]})"
     return True, text + f". {len(sig)} of {len(cells)} cells are above the noise floor."
 
 
 # -- heatmap ------------------------------------------------------------------------------
-_LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP, _LAYER_GAP = 118, 92, 40, 16, 2, 6
+_LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP, _LAYER_GAP = 170, 92, 40, 16, 2, 6
 
 
 def _global_edges(result: TrajectoryResult) -> list[float] | None:
@@ -151,10 +163,12 @@ def render_heatmap(result: TrajectoryResult) -> str:
     prefix = "steps " if result.has_steps else ""
     edges = _global_edges(result)
     lookup = {
-        (i, g.layer, g.component): g for i, r in enumerate(result.intervals) for g in r.groups
+        (i, g.layer, g.component, g.kind): g
+        for i, r in enumerate(result.intervals)
+        for g in r.groups
     }
     ys, y, previous_layer = [], _HEAD_H, "start"
-    for layer, _comp in rows:
+    for layer, _comp, _kind in rows:
         if previous_layer != "start" and layer != previous_layer:
             y += _LAYER_GAP
         ys.append(y)
@@ -170,13 +184,13 @@ def render_heatmap(result: TrajectoryResult) -> str:
             f'<text class="col-head" x="{x}" y="{_HEAD_H - 6}" '
             f'transform="rotate(-50 {x} {_HEAD_H - 6})">{escape(label)}</text>'
         )
-    for (layer, comp), y in zip(rows, ys, strict=True):
+    for (layer, comp, kind), y in zip(rows, ys, strict=True):
         parts.append(
             f'<text class="row-label" x="{_LABEL_W - 6}" y="{y + _CELL_H - 4}">'
-            f"{escape(_row_label(layer, comp))}</text>"
+            f"{escape(_row_label(layer, comp, kind))}</text>"
         )
         for j, label in enumerate(labels):
-            g = lookup.get((j, layer, comp))
+            g = lookup.get((j, layer, comp, kind))
             if g is None:
                 continue
             x = _LABEL_W + j * (_CELL_W + _GAP)
@@ -190,7 +204,7 @@ def render_heatmap(result: TrajectoryResult) -> str:
             if result.intervals[j].identical:
                 reason = "no change: the two files are byte-identical"
             tip = (
-                f"{_where(layer, comp)}, {prefix}{label}\n"
+                f"{_where(layer, comp, kind)}, {prefix}{label}\n"
                 f"relative change {pct(g.rel_delta)} (||dW||/||W|| = {sci(g.rel_delta)})\n"
                 f"noise floor {sci(g.floor)}\nstatus: {reason}"
             )
@@ -265,6 +279,8 @@ def _tick_label(value: float) -> str:
 def render_lines(result: TrajectoryResult) -> tuple[str, str]:
     """(svg, legend html). x: interval end step on a log axis (or interval number)."""
     series = component_series(result)
+    omitted = list(series)[MAX_SERIES:]  # e.g. "other" matrices of an unknown architecture
+    series = dict(list(series.items())[:MAX_SERIES])
     labels = result.interval_labels()
     prefix = "steps " if result.has_steps else ""
     n = len(result.intervals)
@@ -343,7 +359,7 @@ def render_lines(result: TrajectoryResult) -> tuple[str, str]:
     ends = []
     legend = []
     for s, (comp, vs) in enumerate(series.items()):
-        name = COMPONENT_LABELS.get(comp, comp)
+        name = SERIES_LABELS.get(comp, comp)
         dash = DASHES[s % len(DASHES)]
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
         points = [(px(xs[i]), py(v), i, v) for i, v in enumerate(vs) if v]
@@ -401,6 +417,9 @@ def render_lines(result: TrajectoryResult) -> tuple[str, str]:
         else f'<p class="meta">The rounding floor ({sci(floor_ref)}) lies far below every '
         "plotted value, so it is not drawn.</p>"
     )
+    if omitted:
+        names = ", ".join(SERIES_LABELS.get(c, c) for c in omitted)
+        note += f'<p class="meta">Not charted (only {MAX_SERIES} series fit): {escape(names)}.</p>'
     return svg, f'<p class="legend">{"".join(legend)}</p>{note}'
 
 
@@ -414,8 +433,11 @@ def render_interval_table(result: TrajectoryResult) -> str:
             sig = [g for g in r.groups if g.significant]
             count = f"{len(r.significant_tensors)} of {r.n_tensors}"
             if sig:
-                top = max(sig, key=lambda g: (g.rel_delta is not None, g.rel_delta or 0.0))
-                mover = f"{_where(top.layer, top.component)} ({pct(top.rel_delta)})"
+                top = max(
+                    sig,
+                    key=lambda g: (g.kind == "matrix", g.rel_delta is not None, g.rel_delta or 0),
+                )
+                mover = f"{_where(top.layer, top.component, top.kind)} ({pct(top.rel_delta)})"
             else:
                 mover = "no significant change"
         rows.append(
@@ -502,8 +524,9 @@ intervals. Hover a cell for exact numbers.</p>
 
 <section id="lines">
 <h2>Relative change per interval, by component</h2>
-<p class="meta">Each line aggregates one component over all layers (sums of squares). Both
-axes are logarithmic.</p>
+<p class="meta">Each line aggregates one component's weight matrices over all layers (sums of
+squares); "all vectors" is every bias and norm scale together, kept apart so a tiny bias never
+drives a matrix line. Both axes are logarithmic.</p>
 <div class="scroll">$lines</div>
 $line_legend
 </section>

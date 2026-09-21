@@ -107,17 +107,39 @@ def test_diff_result_json_round_trip_is_exact(make_checkpoint, rng, tmp_path):
 
 @pytest.mark.integration
 def test_group_relative_delta_uses_sums_of_squares(make_checkpoint):
-    # One group (layer 0, attn_qkv) with two tensors of very different size.
-    a = {
-        "gpt_neox.layers.0.attention.query_key_value.weight": np.ones((24, 8), np.float32),
-        "gpt_neox.layers.0.attention.query_key_value.bias": np.ones(24, np.float32),
-    }
-    b = {
-        "gpt_neox.layers.0.attention.query_key_value.weight": np.full((24, 8), 1.1, np.float32),
-        "gpt_neox.layers.0.attention.query_key_value.bias": np.full(24, 2.0, np.float32),
-    }
+    # One matrix group (layer 0, attn_qkv): two matrices of very different size (Llama naming).
+    q, k = "model.layers.0.self_attn.q_proj.weight", "model.layers.0.self_attn.k_proj.weight"
+    a = {q: np.ones((24, 8), np.float32), k: np.ones((3, 8), np.float32)}
+    b = {q: np.full((24, 8), 1.1, np.float32), k: np.full((3, 8), 2.0, np.float32)}
     result = diff_checkpoints(make_checkpoint("a.safetensors", a), make_checkpoint("b.st", b))
     (group,) = result.groups
     # sqrt(192 * 0.1^2 + 24 * 1^2) / sqrt(192 + 24) = sqrt(0.12), not the mean ratio 0.55.
     assert group.rel_delta == pytest.approx(math.sqrt(0.12), rel=1e-6)
-    assert (group.layer, group.component, group.status) == (0, "attn_qkv", noise.SIGNIFICANT)
+    assert (group.layer, group.component, group.kind) == (0, "attn_qkv", "matrix")
+    assert group.status == noise.SIGNIFICANT
+
+
+@pytest.mark.integration
+def test_matrices_and_vectors_are_never_mixed_in_a_group(make_checkpoint):
+    # The real Pythia case in miniature: a weight that moves 10% and a tiny bias that grows 300x.
+    w, bias = (
+        "gpt_neox.layers.5.attention.query_key_value.weight",
+        "gpt_neox.layers.5.attention.query_key_value.bias",
+    )
+    a = {w: np.ones((24, 8), np.float32), bias: np.full(24, 0.01, np.float32)}
+    b = {w: np.full((24, 8), 1.1, np.float32), bias: np.full(24, 3.0, np.float32)}
+    result = diff_checkpoints(make_checkpoint("a.safetensors", a), make_checkpoint("b.st", b))
+    groups = {g.kind: g for g in result.groups}
+    assert set(groups) == {"matrix", "vector"}
+    assert groups["matrix"].tensors == (w,) and groups["vector"].tensors == (bias,)
+    assert groups["matrix"].rel_delta == pytest.approx(0.1, rel=1e-5)  # not driven by the bias
+    assert groups["vector"].rel_delta == pytest.approx(299.0, rel=1e-5)
+
+    from trajectory_explorer.report import render_heatmap, summary_sentence
+
+    heatmap = render_heatmap(result)
+    assert "layer 5 matrices" in heatmap and "layer 5 vectors" in heatmap
+    assert "layer 5 attn QKV (matrix)" in heatmap and "layer 5 attn QKV (vector)" in heatmap
+    banner = summary_sentence(result)[1]
+    assert banner.startswith("The largest weight-matrix change is in layer 5 attn QKV (10%)")
+    assert "largest vector change (biases, norm scales) is in layer 5 attn QKV (29,900%)" in banner

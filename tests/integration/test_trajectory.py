@@ -71,9 +71,14 @@ def test_planted_changes_show_up_in_the_right_interval(tmp_path, rng):
         "noise-floor",
         "interval-lengths",
     ]
-    assert report.banner.startswith("attn QKV moved most") or report.banner.startswith("MLP out")
+    assert report.banner.startswith(("attn QKV (matrix) moved most", "MLP out (matrix) moved most"))
     assert report.sig_cells == 2
     assert "0 to 1" in html and "1 to 2" in html
+    # Matrices and vectors are separate rows, and the line chart has one "all vectors" series.
+    assert "L0 attn QKV (matrix)" in html and "L0 attn QKV (vector)" in html
+    assert html.count('<span class="key"><svg width="34"') == 7  # 6 matrix components + vectors
+    assert "all vectors</span>" in html
+    assert html.count('class="end-label"') == 2  # only the two planted series have points
     assert "reference scale, not a null" in html
     assert report.external_refs == [] and report.forbidden_tags == []
 
