@@ -41,6 +41,15 @@ STATUS_TEXT = {
     noise.NO_CHANGE: "no change",
 }
 
+# Short forms for the table's status column (the full wording is in tooltips and the legend).
+STATUS_SHORT = {
+    noise.SIGNIFICANT: "above floor",
+    noise.FROM_ZERO: "from zero",
+    noise.BELOW_FLOOR: "≤ floor",
+    noise.BELOW_CONTROL: "≤ control",
+    noise.NO_CHANGE: "unchanged",
+}
+
 # Heatmap geometry (SVG user units).
 _LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP = 84, 28, 92, 34, 2
 
@@ -222,7 +231,7 @@ def _table(rows: list[tuple[str, TensorMetrics]]) -> str:
             f'<td class="num">{"&ndash;" if m.r90 is None else m.r90}</td>'
             f'<td class="nowrap">{escape(m.rank_label)}</td>'
             f'<td class="nowrap">{escape(m.concentration_label)}</td>'
-            f"<td>{escape(STATUS_TEXT.get(m.status, m.status))}</td></tr>"
+            f'<td class="nowrap">{escape(STATUS_SHORT.get(m.status, m.status))}</td></tr>'
         )
     return (
         "<table><thead><tr><th>#</th><th>tensor</th><th>where</th><th>shape</th>"
@@ -424,10 +433,24 @@ details { margin-top: 12px; } summary { cursor: pointer; color: var(--ink-2); }
 dt { font-weight: 600; margin-top: 8px; } dd { margin: 0 0 0 16px; color: var(--ink-2); }
 footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 @media print {
-  :root { color-scheme: light; --page: #ffffff; --surface: #ffffff; }
-  body { font-size: 11pt; }
+  /* Always print the light palette, even when the viewer's OS is in dark mode. */
+  :root {
+    color-scheme: light;
+    --surface: #ffffff; --page: #ffffff; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --hair: #e1e0d9; --border: #c3c2b7;
+    --b0: #86b6ef; --b1: #5598e7; --b2: #2a78d6; --b3: #1c5cab; --b4: #104281;
+    --t0: #0b0b0b; --t1: #0b0b0b; --t2: #ffffff; --t3: #ffffff; --t4: #ffffff;
+    --hatch-bg: #f0efec; --hatch-line: #c3c2b7;
+    --banner-ok: #eef5ee; --banner-sig: #eaf2fd;
+  }
+  body { font-size: 10pt; }
   main { max-width: none; padding: 0; }
-  section, .banner { break-inside: avoid; border-color: #c3c2b7; }
+  section { padding: 2px 10px 8px; }
+  #summary, #heatmap, #noise-floor, #labels { break-inside: avoid; }
+  tr { break-inside: avoid; }
+  table { font-size: 8pt; }
+  td.name { font-size: 7.5pt; }
+  th, td { padding: 3px 4px; }
   svg.heatmap, .legend svg, .banner {
     print-color-adjust: exact; -webkit-print-color-adjust: exact;
   }
