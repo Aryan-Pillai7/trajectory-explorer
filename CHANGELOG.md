@@ -12,4 +12,3 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `trajectory-explorer --version`.
 - Docker image (`runtime` and `dev` stages) and compose services `te`, `test`, `lint`,
   `format`. Generated data goes to the required `TE_DATA_DIR` bind mount.
-- GitHub Actions CI: ruff lint/format check and pytest, both run through docker compose.
