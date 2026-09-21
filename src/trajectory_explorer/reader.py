@@ -1,11 +1,14 @@
 """Lazy, one-tensor-at-a-time reader for safetensors checkpoints.
 
 The header (names, dtypes, shapes, byte offsets) is parsed directly, so inspecting a
-checkpoint never touches weight bytes. ``Checkpoint.load`` reads a single tensor and returns
-it as float32. F32/F16/F64 go through the safetensors library; BF16 is decoded from raw bytes
-because safetensors' numpy backend rejects it (measured: safetensors 0.8.0 + numpy 2.5.3 raise
-``TypeError: data type 'bfloat16' not understood``). BF16 is the top half of a float32, so
-widening the 16 bits into the high half of a uint32 is exact.
+checkpoint never touches weight bytes. ``Checkpoint.load`` reads a single tensor with a plain
+seek + read at its header offset and returns it as float32. Nothing is memory-mapped: with
+safetensors' ``safe_open`` every loaded tensor also left the same amount of file-backed pages
+mapped until the file closed (measured, decision D30/D31).
+
+BF16 is the top half of a float32, so widening the 16 bits into the high half of a uint32 is
+exact (safetensors' numpy backend rejects BF16 outright: ``data type 'bfloat16' not
+understood``, safetensors 0.8.0 + numpy 2.5.3).
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ from types import TracebackType
 from typing import BinaryIO
 
 import numpy as np
-from safetensors import safe_open
 
 from trajectory_explorer.errors import CheckpointFormatError, InputError, UnsupportedDtypeError
 
@@ -29,6 +31,8 @@ DTYPE_SIZES: dict[str, int] = {
     "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U64": 8, "U32": 4, "U16": 2, "U8": 1, "BOOL": 1,
 }  # fmt: skip
 FLOAT_DTYPES = frozenset({"F64", "F32", "F16", "BF16"})
+# Little-endian numpy dtypes used to read each float format from disk (BF16 read as raw bits).
+_DISK_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": "<u2"}
 _MAX_HEADER_BYTES = 100 * 1024 * 1024
 
 
@@ -98,8 +102,7 @@ class Checkpoint:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._specs, self.metadata, self._data_start = read_header(self.path)
-        self._st = None  # safetensors handle, opened lazily on first non-BF16 load
-        self._raw: BinaryIO | None = None
+        self._raw: BinaryIO | None = None  # opened lazily on the first load
 
     # -- header-only inspection -------------------------------------------------------
     def specs(self) -> dict[str, TensorSpec]:
@@ -122,28 +125,23 @@ class Checkpoint:
             raise UnsupportedDtypeError(
                 f"{self.path}: tensor {name!r} has non-float dtype {spec.dtype}"
             )
-        if spec.dtype == "BF16":
-            return self._load_bf16(spec)
-        if self._st is None:
-            self._st = safe_open(str(self.path), framework="np")
-        array = self._st.get_tensor(name)
-        return np.ascontiguousarray(array, dtype=np.float32)
-
-    def _load_bf16(self, spec: TensorSpec) -> np.ndarray:
         if self._raw is None:
             self._raw = self.path.open("rb")
         self._raw.seek(self._data_start + spec.offsets[0])
-        bits = np.fromfile(self._raw, dtype="<u2", count=spec.numel)
-        if bits.size != spec.numel:
-            raise CheckpointFormatError(f"{self.path}: truncated data for {spec.name!r}")
-        return (bits.astype(np.uint32) << 16).view(np.float32).reshape(spec.shape)
+        raw = np.fromfile(self._raw, dtype=_DISK_DTYPES[spec.dtype], count=spec.numel)
+        if raw.size != spec.numel:
+            raise CheckpointFormatError(f"{self.path}: truncated data for {name!r}")
+        if spec.dtype == "BF16":
+            values = (raw.astype(np.uint32) << 16).view(np.float32)
+        else:
+            values = raw.astype(np.float32, copy=False)  # F32: no copy; F16/F64: one conversion
+        return values.reshape(spec.shape)
 
     # -- lifecycle --------------------------------------------------------------------
     def close(self) -> None:
         if self._raw is not None:
             self._raw.close()
             self._raw = None
-        self._st = None
 
     def __enter__(self) -> Checkpoint:
         return self

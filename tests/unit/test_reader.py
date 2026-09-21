@@ -33,6 +33,34 @@ def test_decodes_f32_f16_bf16_to_float32(make_checkpoint, rng):
 
 
 @pytest.mark.unit
+def test_plain_reads_are_bit_identical_to_safetensors(make_checkpoint, rng):
+    """The seek+read path returns exactly what safetensors' own loader returns."""
+    from safetensors import safe_open
+
+    special = np.array([0.0, -0.0, 1e-45, -3.4e38, np.inf, -np.inf, np.nan, 65504.0], np.float32)
+    values = np.concatenate([special, rng.standard_normal(56).astype(np.float32)]).reshape(8, 8)
+    with np.errstate(over="ignore"):  # -3.4e38 -> -inf in float16, on purpose
+        f16 = values.astype(np.float16)
+    tensors = {
+        "f32": values,
+        "f16": f16,
+        "f64": values.astype(np.float64),
+        "bf16": ("BF16", to_bf16_bits(values)),
+    }
+    path = make_checkpoint("exact.safetensors", tensors)
+
+    with Checkpoint(path) as ckpt, safe_open(str(path), framework="np") as ref:
+        for name in ("f32", "f16", "f64"):
+            ours = ckpt.load(name)
+            theirs = ref.get_tensor(name).astype(np.float32)
+            assert ours.dtype == np.float32
+            np.testing.assert_array_equal(ours.view(np.uint32), theirs.view(np.uint32))
+        bf16 = ckpt.load("bf16")
+    expected = from_bf16_bits(to_bf16_bits(values)).reshape(8, 8)
+    np.testing.assert_array_equal(bf16.view(np.uint32), expected.view(np.uint32))
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("case", ["missing", "garbage", "non_float"])
 def test_bad_inputs_raise_clear_errors(case, tmp_path: Path, make_checkpoint):
     if case == "missing":
