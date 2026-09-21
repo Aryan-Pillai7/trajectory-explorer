@@ -96,7 +96,7 @@ def test_diff_result_json_round_trip_is_exact(make_checkpoint, rng, tmp_path):
     assert result.tensors["gpt_neox.layers.0.attention.dense.bias"].status == noise.FROM_ZERO
 
     text = result.to_json()
-    assert json.loads(text)["schema_version"] == 1
+    assert json.loads(text)["schema_version"] == 2
     assert DiffResult.from_json(text) == result
 
     name = next(iter(result.tensors))

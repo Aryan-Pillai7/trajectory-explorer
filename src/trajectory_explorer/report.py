@@ -299,16 +299,30 @@ def summary_sentence(result: DiffResult) -> tuple[bool, str]:
     )
 
 
+def precision_rule_note(n_rule: int) -> str:
+    """Plain statement of when the float16-content rule (D40) set a tensor's floor."""
+    if not n_rule:
+        return ""
+    return (
+        f"<li>{n_rule} tensor comparison(s): stored as float32, but every value is exactly a "
+        "float16 number (in both checkpoints), so the float16 rounding floor applies.</li>"
+    )
+
+
 def render_noise_floor(result: DiffResult) -> str:
     if result.identical:
         floors_html = "<li>Not needed: the files are byte-identical.</li>"
     else:
-        pairs = Counter((m.dtype_a, m.dtype_b, m.floor) for m in result.tensors.values())
-        floors_html = "".join(
-            f"<li>{count} tensor(s) stored as {escape(da)} in A and {escape(db)} in B: floor "
-            f"{sci(floor)} ({pct(floor)})</li>"
-            for (da, db, floor), count in sorted(pairs.items())
+        pairs = Counter(
+            (m.dtype_a, m.dtype_b, m.floor, m.f16_rule) for m in result.tensors.values()
         )
+        floors_html = "".join(
+            f"<li>{count} tensor(s) stored as {escape(da)} in A and {escape(db)} in B"
+            + (" (float16 values only: float16 floor)" if rule else "")
+            + f": floor {sci(floor)} ({pct(floor)})</li>"
+            for (da, db, floor, rule), count in sorted(pairs.items())
+        )
+        floors_html += precision_rule_note(sum(m.f16_rule for m in result.tensors.values()))
     statuses = Counter(m.status for m in result.tensors.values())
     counts = (
         f"Of {result.n_tensors} compared tensors: "

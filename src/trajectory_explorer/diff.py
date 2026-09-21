@@ -34,7 +34,7 @@ from trajectory_explorer.reader import Checkpoint
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: precision-rule fields (D40)
 CACHE_FORMAT = 1
 _HASH_CHUNK = 4 * 1024 * 1024
 

@@ -27,6 +27,7 @@ from trajectory_explorer.report import (
     STATUS_TEXT,
     _bin,
     pct,
+    precision_rule_note,
     sci,
 )
 from trajectory_explorer.report import _legend as bin_legend
@@ -431,6 +432,7 @@ def render_noise_floor(result: TrajectoryResult) -> str:
     floors = Counter(
         (m.dtype_a, m.dtype_b, m.floor) for r in result.intervals for m in r.tensors.values()
     )
+    n_rule = sum(m.f16_rule for r in result.intervals for m in r.tensors.values())
     statuses = Counter(g.status for r in result.intervals for g in r.groups)
     n_cells = sum(statuses.values())
     items = (
@@ -447,7 +449,7 @@ def render_noise_floor(result: TrajectoryResult) -> str:
         "the smallest relative change that storage rounding alone can produce "
         "(3 &times; &radic;(u<sub>A</sub>&sup2; + u<sub>B</sub>&sup2;) / &radic;3 for the two "
         "stored formats); cells at or below it are hatched grey.</p>"
-        f"<ul>{items}</ul>"
+        f"<ul>{items}{precision_rule_note(n_rule)}</ul>"
         f"<p>{above} of {n_cells} cells are above the floor, "
         f"{statuses[noise.BELOW_FLOOR]} at or below it, {statuses[noise.NO_CHANGE]} unchanged.</p>"
         "<p><strong>Adjacent-step diffs are a reference scale, not a null.</strong> The model "

@@ -16,21 +16,50 @@ import numpy as np
 from trajectory_explorer import noise
 
 # Bump when any metric's meaning changes; cached results with another version are recomputed.
-METRICS_VERSION = 1
+# v2: raw measurements record whether F32 tensors hold only float16-exact values (D40).
+METRICS_VERSION = 2
 
 # float64 elements per chunk (4M elements = 32 MB).
 DEFAULT_CHUNK_ELEMENTS = 4_000_000
 ENERGY_FRACTION = 0.9  # r90: number of singular values holding 90% of the delta's energy
 
 
-def sum_squares(x: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS) -> float:
-    """Sum of squares with float64 accumulation, one bounded chunk at a time."""
+def _f16_exact(chunk: np.ndarray) -> bool:
+    """True if every float32 value survives float32 -> float16 -> float32 bit for bit.
+
+    NaN counts as representable when it round-trips to NaN (payload bits may change); +-inf
+    round-trips exactly; finite values beyond float16's range become inf and fail.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        back = chunk.astype(np.float16).astype(np.float32)
+    same = chunk.view(np.uint32) == back.view(np.uint32)
+    if same.all():
+        return True
+    return bool((same | (np.isnan(chunk) & np.isnan(back))).all())
+
+
+def sum_squares_and_f16(
+    x: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS, *, check_f16: bool = False
+) -> tuple[float, bool | None]:
+    """Sum of squares (float64 accumulation) and, optionally, float16 exactness, in one pass.
+
+    Works on bounded chunks, so no full extra copy of a big tensor is made.
+    """
     flat = x.reshape(-1)
     total = 0.0
+    exact: bool | None = True if check_f16 else None
     for start in range(0, flat.size, chunk_elements):
-        chunk = flat[start : start + chunk_elements].astype(np.float64)
+        block = flat[start : start + chunk_elements]
+        if exact:
+            exact = _f16_exact(np.ascontiguousarray(block, dtype=np.float32))
+        chunk = block.astype(np.float64)
         total += float(np.dot(chunk, chunk))
-    return total
+    return total, exact
+
+
+def sum_squares(x: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS) -> float:
+    """Sum of squares with float64 accumulation, one bounded chunk at a time."""
+    return sum_squares_and_f16(x, chunk_elements)[0]
 
 
 def gram_singular_values(d: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS) -> np.ndarray:
@@ -142,6 +171,10 @@ class TensorMeasurement:
     r90: int | None
     rank_dims: int | None  # min(rows, cols): the largest possible rank
     top_row_share: float | None
+    # Every value is exactly a float16 number: True for F16 storage, checked for F32 storage,
+    # None (not applicable) for other stored dtypes.
+    exact_f16_a: bool | None = None
+    exact_f16_b: bool | None = None
 
     @property
     def rel_delta(self) -> float | None:
@@ -177,11 +210,15 @@ class TensorMetrics:
     r90: int | None
     rank_dims: int | None
     top_row_share: float | None
-    floor: float  # dtype rounding floor on rel_delta
+    floor: float  # rounding floor on rel_delta (from the effective precision, D40)
     control: float | None  # optional reference scale on rel_delta
     status: str  # see noise.assess
     rank_label: str  # "low-rank" | "dense" | "n/a"
     concentration_label: str  # "concentrated" | "spread" | "n/a"
+    # True when a float32-stored side was treated as float16 for the floor (D40).
+    f16_rule: bool = False
+    exact_f16_a: bool | None = None  # copied from the measurement
+    exact_f16_b: bool | None = None
 
     @property
     def significant(self) -> bool:
@@ -213,8 +250,10 @@ def measure_tensor(
         raise ValueError(f"shape mismatch: {a.shape} vs {b.shape}")
     d = np.subtract(b, a, dtype=np.float32)
 
-    ss_a = sum_squares(a, chunk_elements)
-    ss_b = sum_squares(b, chunk_elements)
+    ss_a, exact_a = sum_squares_and_f16(a, chunk_elements, check_f16=dtype_a == "F32")
+    ss_b, exact_b = sum_squares_and_f16(b, chunk_elements, check_f16=dtype_b == "F32")
+    exact_a = True if dtype_a == "F16" else exact_a
+    exact_b = True if dtype_b == "F16" else exact_b
     ss_d = sum_squares(d, chunk_elements)
     if not all(math.isfinite(v) for v in (ss_a, ss_b, ss_d)):
         raise ValueError("tensor contains NaN or inf values")
@@ -244,13 +283,29 @@ def measure_tensor(
         r90=r90,
         rank_dims=rank_dims,
         top_row_share=top_row_share(d, chunk_elements=chunk_elements) if abs_delta else None,
+        exact_f16_a=exact_a,
+        exact_f16_b=exact_b,
+    )
+
+
+def effective_dtypes(m: TensorMeasurement) -> tuple[str, str, bool]:
+    """Stored dtypes, except float32 sides count as float16 when both sides hold only
+    float16-exact values (D40). Returns (dtype_a, dtype_b, rule_applied)."""
+    both_f16 = m.exact_f16_a is True and m.exact_f16_b is True
+    if not both_f16 or "F32" not in (m.dtype_a, m.dtype_b):
+        return m.dtype_a, m.dtype_b, False
+    return (
+        "F16" if m.dtype_a == "F32" else m.dtype_a,
+        "F16" if m.dtype_b == "F32" else m.dtype_b,
+        True,
     )
 
 
 def assess_tensor(m: TensorMeasurement, control: float | None = None) -> TensorMetrics:
     """Apply the rounding floor, the optional control scale and the labels to a measurement."""
     rel_delta = m.rel_delta
-    floor = noise.dtype_floor(m.dtype_a, m.dtype_b)
+    eff_a, eff_b, f16_rule = effective_dtypes(m)
+    floor = noise.dtype_floor(eff_a, eff_b)
     return TensorMetrics(
         shape=m.shape,
         dtype_a=m.dtype_a,
@@ -272,6 +327,9 @@ def assess_tensor(m: TensorMeasurement, control: float | None = None) -> TensorM
         concentration_label=noise.concentration_label(
             m.top_row_share, m.shape[0] if m.shape else 0
         ),
+        f16_rule=f16_rule,
+        exact_f16_a=m.exact_f16_a,
+        exact_f16_b=m.exact_f16_b,
     )
 
 

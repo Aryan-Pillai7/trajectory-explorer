@@ -33,7 +33,7 @@ from trajectory_explorer.diff import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: precision-rule fields (D40)
 DEFAULT_POINTS = 25
 _STEP_BRANCH = re.compile(r"^step(\d+)$")
 _STEP_LABEL = re.compile(r"(?:^|@)step(\d+)$")
