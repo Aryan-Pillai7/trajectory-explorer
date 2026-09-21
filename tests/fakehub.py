@@ -26,6 +26,7 @@ class FakeHub:
         self.bin_only: set[Key] = set()
         self.corrupt: set[Key] = set()
         self.drop_after: dict[Key, int] = {}
+        self.advertised_size: dict[Key, int] = {}  # metadata size override (guard demos)
         self.delay = 0.0
         self.requests: list[dict] = []  # {"server", "method", "path", "headers"}
         self._servers = [self._serve("hub"), self._serve("cdn")]
@@ -98,13 +99,14 @@ class FakeHub:
                     entries = [{"type": "file", "path": "pytorch_model.bin", "size": 10}]
                 elif key in hub.files:
                     data = hub.files[key]
-                    lfs = {"oid": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                    size = hub.advertised_size.get(key, len(data))
+                    lfs = {"oid": hashlib.sha256(data).hexdigest(), "size": size}
                     entries = [
                         {"type": "file", "path": "config.json", "size": 2, "oid": "0" * 40},
                         {
                             "type": "file",
                             "path": "model.safetensors",
-                            "size": len(data),
+                            "size": size,
                             "oid": "1" * 40,
                             "lfs": {**lfs, "pointerSize": 134},
                         },
@@ -144,7 +146,11 @@ class FakeHub:
                     return
                 self.wfile.write(body)
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class QuietServer(ThreadingHTTPServer):
+            def handle_error(self, request: object, client_address: object) -> None:
+                pass  # dropped connections are deliberate in some tests
+
+        server = QuietServer(("127.0.0.1", 0), Handler)
         server.daemon_threads = True
         threading.Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True

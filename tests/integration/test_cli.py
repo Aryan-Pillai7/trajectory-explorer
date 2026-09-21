@@ -54,7 +54,7 @@ def test_diff_end_to_end_writes_html_json_and_default_path(
         ("bad_control", 2, "expected A2:B2"),
         ("mismatch", 3, "gpt_neox.embed_in.weight: A[40, 8] vs B[40, 16]"),
         ("missing", 4, "Checkpoint not found"),
-        ("hub_source", 4, "Hub sources are not built yet"),
+        ("unknown_format", 4, "neither an existing local path nor a Hub source"),
     ],
 )
 def test_exit_codes(case, code, message, make_checkpoint, rng, tmp_path, capsys):
@@ -69,7 +69,7 @@ def test_exit_codes(case, code, message, make_checkpoint, rng, tmp_path, capsys)
             str(make_checkpoint("wide.safetensors", neox_tensors(rng, hidden=16))),
         ],
         "missing": ["diff", str(a), str(tmp_path / "nope.safetensors")],
-        "hub_source": ["diff", "EleutherAI/pythia-70m@step1000", str(a)],
+        "unknown_format": ["diff", "pythia@step1000", str(a)],
     }[case]
     assert run(argv) == code
     captured = capsys.readouterr()

@@ -11,19 +11,28 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
 from trajectory_explorer._version import __version__
-from trajectory_explorer.diff import DiffOptions, DiffResult, diff_checkpoints
+from trajectory_explorer.diff import (
+    CheckpointSource,
+    DiffOptions,
+    DiffResult,
+    diff_checkpoints,
+    files_needed,
+)
 from trajectory_explorer.errors import InputError, TrajectoryExplorerError
 from trajectory_explorer.report import render_html, summary_sentence
+from trajectory_explorer.sources import HubSource, resolve
+from trajectory_explorer.store import DEFAULT_MAX_CHECKPOINTS, CheckpointStore
 
 PROG = "trajectory-explorer"
 log = logging.getLogger("trajectory_explorer")
 
-# "org/name@revision", e.g. EleutherAI/pythia-70m@step1000
-_HUB_SPEC = re.compile(r"^[\w.-]+/[\w.-]+@[\w./-]+$")
+# Downloads above this total need confirmation (decision D13): a y/N prompt or --yes.
+GUARD_BYTES = 2 * 10**9
 
 
 class UsageError(TrajectoryExplorerError):
@@ -31,23 +40,11 @@ class UsageError(TrajectoryExplorerError):
 
 
 # -- argument helpers ---------------------------------------------------------------------
-def resolve_local(spec: str) -> Path:
-    """A .safetensors file, or a directory containing model.safetensors."""
-    path = Path(spec)
-    if path.is_dir():
-        candidate = path / "model.safetensors"
-        if not candidate.is_file():
-            raise InputError(f"Directory {spec} has no model.safetensors")
-        return candidate
-    if path.is_file():
-        return path
-    if _HUB_SPEC.match(spec):
-        raise InputError(
-            f"{spec!r} looks like a Hugging Face source (repo@revision). Hub sources are not "
-            "built yet: pass a local .safetensors file or a directory containing "
-            "model.safetensors."
-        )
-    raise InputError(f"Checkpoint not found: {spec}")
+def _max_checkpoints(value: str) -> int:
+    number = int(value)
+    if number < 2:
+        raise argparse.ArgumentTypeError("a diff needs at least 2 checkpoints on disk at once")
+    return number
 
 
 def parse_control(value: str) -> tuple[str, str]:
@@ -99,14 +96,88 @@ def _write(path: Path, text: str) -> None:
         raise UsageError(f"Cannot write {path}: {exc.strerror or exc}") from exc
 
 
+# -- download guard -----------------------------------------------------------------------
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.2f} GB" if n >= 1e8 else f"{n / 1e6:.1f} MB"
+
+
+def _duration(seconds: float) -> str:
+    minutes, secs = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {secs:02d}s"
+
+
+def planned_downloads(
+    a: CheckpointSource,
+    b: CheckpointSource,
+    control: tuple[CheckpointSource, CheckpointSource] | None,
+    cache_dir: Path | None,
+) -> list[HubSource]:
+    """Hub files this diff will actually download, in the order the engine needs them."""
+    needed = files_needed(a, b, cache_dir)
+    if (
+        control
+        and a.info.sha256 != b.info.sha256
+        and control[0].info.sha256 != control[1].info.sha256
+    ):
+        needed += files_needed(control[0], control[1], cache_dir)
+    pending: list[HubSource] = []
+    for source in needed:
+        new = all(p.info.path != source.info.path for p in pending)
+        if isinstance(source, HubSource) and source.needs_download() and new:
+            pending.append(source)
+    return pending
+
+
+def download_guard(pending: list[HubSource], *, yes: bool) -> None:
+    """Announce planned downloads; over GUARD_BYTES, measure, estimate and ask first."""
+    if not pending:
+        return
+    total = sum(s.info.size_bytes for s in pending)
+    print(f"Downloads needed: {len(pending)} file(s), {_gb(total)} in total.", file=sys.stderr)
+    if total <= GUARD_BYTES:
+        return
+    if not yes and not _stdin_is_tty():
+        raise InputError(
+            f"That is more than the {_gb(GUARD_BYTES)} allowed without confirmation, and there "
+            "is no terminal to ask. Nothing was downloaded. Re-run with --yes to allow it."
+        )
+    first = pending[0]
+    start = time.perf_counter()
+    with first.fetch():
+        pass
+    rate = first.info.size_bytes / max(time.perf_counter() - start, 1e-6)
+    rest = total - first.info.size_bytes
+    print(
+        f"Measured {rate / 1e6:.1f} MB/s on the first file. The remaining {len(pending) - 1} "
+        f"file(s), {_gb(rest)}, should take about {_duration(rest / rate)}.",
+        file=sys.stderr,
+    )
+    if yes:
+        return
+    answer = input("Continue downloading? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        raise InputError("Download not confirmed. Nothing more was downloaded.")
+
+
 # -- commands -----------------------------------------------------------------------------
 def cmd_diff(args: argparse.Namespace) -> int:
-    a, b = resolve_local(args.a), resolve_local(args.b)
+    store = CheckpointStore(
+        _data_dir() / "checkpoints",
+        args.max_checkpoints,
+        announce=lambda message: print(message, file=sys.stderr),
+    )
+    a, b = resolve(args.a, store), resolve(args.b, store)
     control = None
     if args.control:
-        control = (resolve_local(args.control[0]), resolve_local(args.control[1]))
+        control = (resolve(args.control[0], store), resolve(args.control[1], store))
     cache_dir = _data_dir() / "metrics" if "TE_DATA_DIR" in os.environ else None
 
+    download_guard(planned_downloads(a, b, control, cache_dir), yes=args.yes)
     result = diff_checkpoints(a, b, DiffOptions(cache_dir=cache_dir, control=control))
 
     output = Path(args.output) if args.output else default_report_path(result)
@@ -139,11 +210,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="compare two checkpoints and write an HTML report",
         description=(
             "Compare checkpoint B against checkpoint A (relative changes are measured against "
-            "A). Each argument is a .safetensors file or a directory containing "
-            "model.safetensors. Buffers such as attention masks are skipped by name."
+            "A). Each argument is a .safetensors file, a directory containing "
+            "model.safetensors, or a Hugging Face source org/name@revision (e.g. "
+            "EleutherAI/pythia-70m@step1000), which is downloaded to $TE_DATA_DIR/checkpoints. "
+            "Buffers such as attention masks are skipped by name."
         ),
     )
-    diff.add_argument("a", metavar="A", help="reference checkpoint")
+    diff.add_argument("a", metavar="A", help="reference checkpoint (path or org/name@revision)")
     diff.add_argument("b", metavar="B", help="checkpoint to compare against A")
     diff.add_argument(
         "-o",
@@ -160,6 +233,19 @@ def build_parser() -> argparse.ArgumentParser:
         "checkpoints really differ.",
     )
     diff.add_argument("--json", metavar="PATH", help="also write the raw result as JSON")
+    diff.add_argument(
+        "--yes",
+        action="store_true",
+        help=f"allow downloads over {GUARD_BYTES // 10**9} GB without asking",
+    )
+    diff.add_argument(
+        "--max-checkpoints",
+        metavar="N",
+        type=_max_checkpoints,
+        default=DEFAULT_MAX_CHECKPOINTS,
+        help="downloaded checkpoints kept on disk at once, least recently used evicted first "
+        f"(default: {DEFAULT_MAX_CHECKPOINTS})",
+    )
     diff.add_argument(
         "-v", "--verbose", action="count", default=0, help="-v for progress, -vv for debug"
     )

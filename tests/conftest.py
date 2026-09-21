@@ -186,6 +186,10 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "data"
     monkeypatch.setenv("TE_DATA_DIR", str(data))
     monkeypatch.delenv("TE_HOST_DATA_DIR", raising=False)
+    # Offline by default: any Hub request goes to a closed local port unless a test uses the
+    # fake_hub fixture (or is an opt-in network test that deliberately undoes this).
+    monkeypatch.setenv("HF_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
     return data
 
 
