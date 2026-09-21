@@ -30,9 +30,10 @@ def test_report_has_sections_in_order_is_offline_and_ranks_changes(make_checkpoi
     for table in ("ranked-matrices", "ranked-vectors"):
         heads = report.table_heads[table]
         assert "starting norm ||WA||" in heads and "absolute change ||ΔW||" in heads
-    assert "rank" in report.table_heads["ranked-matrices"]
-    assert "rank" not in report.table_heads["ranked-vectors"]
-    assert "effective rank" not in report.table_heads["ranked-vectors"]
+    assert "rank, spread" in report.table_heads["ranked-matrices"]
+    assert not any("rank" in h for h in report.table_heads["ranked-vectors"])
+    assert len(report.table_heads["ranked-matrices"]) <= 9  # fits a laptop screen
+    assert "status" in report.table_heads["all-matrices"]  # the full lists keep the status
     assert report.table_rows["all-matrices"] + report.table_rows["all-vectors"] == len(base)
     assert report.external_refs == []
     assert report.forbidden_tags == []
