@@ -1,0 +1,7 @@
+# Normalize line endings to LF in the repo and working tree, regardless of
+# core.autocrlf, so files copied into the Linux container behave the same.
+* text=auto eol=lf
+
+*.safetensors binary
+*.bin binary
+*.png binary

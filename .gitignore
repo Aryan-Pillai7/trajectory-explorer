@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# trajectory-explorer project rules
+# ---------------------------------------------------------------------------
+# Internal agent/maintainer files: never committed.
+/CLAUDE.md
+/.internal/
+/scratch/
+.claude/settings.local.json
+
+# Generated data lives under TE_DATA_DIR (outside the repo); guard against
+# accidental copies of weights, metrics or reports inside the working tree.
+/data/
+*.safetensors
+*.bin
+/reports/

@@ -1,0 +1,10 @@
+# Allowlist: only what the image needs enters the build context.
+# Keeps CLAUDE.md, .internal/, .env, scratch/ and .git out of the image.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!tests/
+**/__pycache__
+**/*.py[cod]
