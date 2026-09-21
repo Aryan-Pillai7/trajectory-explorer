@@ -1,0 +1,222 @@
+"""Per-tensor delta metrics: norms, spectrum, effective rank, row concentration.
+
+All reductions accumulate in float64 over bounded chunks, so memory stays at roughly the size
+of the two input tensors plus their difference, even for a 50304 x 512 embedding.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass
+from functools import lru_cache
+from typing import Any
+
+import numpy as np
+
+from trajectory_explorer import noise
+
+# Bump when any metric's meaning changes; cached results with another version are recomputed.
+METRICS_VERSION = 1
+
+# float64 elements per chunk (4M elements = 32 MB).
+DEFAULT_CHUNK_ELEMENTS = 4_000_000
+ENERGY_FRACTION = 0.9  # r90: number of singular values holding 90% of the delta's energy
+
+
+def sum_squares(x: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS) -> float:
+    """Sum of squares with float64 accumulation, one bounded chunk at a time."""
+    flat = x.reshape(-1)
+    total = 0.0
+    for start in range(0, flat.size, chunk_elements):
+        chunk = flat[start : start + chunk_elements].astype(np.float64)
+        total += float(np.dot(chunk, chunk))
+    return total
+
+
+def gram_singular_values(d: np.ndarray, chunk_elements: int = DEFAULT_CHUNK_ELEMENTS) -> np.ndarray:
+    """Singular values of a 2-D matrix, descending, via the smaller Gram matrix.
+
+    For an m x n matrix with n <= m this builds the n x n matrix D^T D (else D D^T) in float64,
+    accumulated over row (or column) chunks, and takes its eigenvalues: sigma_i = sqrt(lambda_i).
+    Squaring loses singular values below ~1e-8 of the largest; they carry no weight in the
+    entropy rank or r90.
+    """
+    rows, cols = d.shape
+    if cols <= rows:
+        gram = np.zeros((cols, cols), dtype=np.float64)
+        step = max(1, chunk_elements // max(cols, 1))
+        for start in range(0, rows, step):
+            block = d[start : start + step].astype(np.float64)
+            gram += block.T @ block
+    else:
+        gram = np.zeros((rows, rows), dtype=np.float64)
+        step = max(1, chunk_elements // max(rows, 1))
+        for start in range(0, cols, step):
+            block = d[:, start : start + step].astype(np.float64)
+            gram += block @ block.T
+    eigenvalues = np.clip(np.linalg.eigvalsh(gram), 0.0, None)[::-1]
+    return np.sqrt(eigenvalues)
+
+
+def entropy_effective_rank(singular_values: np.ndarray) -> float | None:
+    """Roy & Vetterli (2007): exp(Shannon entropy of sigma / sum(sigma)). None if all zero."""
+    total = float(singular_values.sum())
+    if total <= 0.0:
+        return None
+    p = singular_values[singular_values > 0] / total
+    return float(np.exp(-np.sum(p * np.log(p))))
+
+
+def energy_rank(singular_values: np.ndarray, fraction: float = ENERGY_FRACTION) -> int | None:
+    """Smallest k such that the top-k singular values hold ``fraction`` of sum(sigma^2)."""
+    energy = singular_values.astype(np.float64) ** 2
+    total = float(energy.sum())
+    if total <= 0.0:
+        return None
+    cumulative = np.cumsum(energy) / total
+    return int(np.searchsorted(cumulative, fraction - 1e-12)) + 1
+
+
+@lru_cache(maxsize=256)
+def random_erank_ratio(n_small: int, n_large: int, points: int = 4096) -> float:
+    """Expected erank / n_small for an n_small x n_large Gaussian matrix (Marchenko-Pastur).
+
+    With aspect ratio lam = n_small / n_large, squared singular values (scaled) follow the
+    Marchenko-Pastur law on [(1 - sqrt(lam))^2, (1 + sqrt(lam))^2]. For singular values s with
+    mean mu, erank / n = mu * exp(-E[s log s] / mu). The integral uses a cosine substitution
+    that removes the square-root edges, then the midpoint rule.
+    """
+    if n_small <= 0 or n_large <= 0:
+        raise ValueError("matrix dimensions must be positive")
+    lam = min(n_small, n_large) / max(n_small, n_large)
+    lo, hi = (1 - math.sqrt(lam)) ** 2, (1 + math.sqrt(lam)) ** 2
+    theta = (np.arange(points) + 0.5) * (math.pi / points)
+    x = lo + (hi - lo) * (1 - np.cos(theta)) / 2
+    weights = np.sin(theta) ** 2 / x  # density * dx, up to a constant
+    weights /= weights.sum()
+    s = np.sqrt(x)
+    mu = float(np.sum(weights * s))
+    return float(mu * math.exp(-float(np.sum(weights * s * np.log(s))) / mu))
+
+
+def top_row_share(
+    d: np.ndarray,
+    fraction: float = noise.TOP_ROW_FRACTION,
+    chunk_elements: int = DEFAULT_CHUNK_ELEMENTS,
+) -> float | None:
+    """Share of the delta's squared norm held by the top ``fraction`` of rows (axis 0).
+
+    For a 1-D tensor each element is a row. None for scalars or an all-zero delta.
+    """
+    if d.ndim == 0 or d.shape[0] == 0:
+        return None
+    rows = d.reshape(d.shape[0], -1)
+    step = max(1, chunk_elements // max(rows.shape[1], 1))
+    row_energy = np.empty(rows.shape[0], dtype=np.float64)
+    for start in range(0, rows.shape[0], step):
+        block = rows[start : start + step].astype(np.float64)
+        row_energy[start : start + step] = np.einsum("ij,ij->i", block, block)
+    total = float(row_energy.sum())
+    if total <= 0.0:
+        return None
+    k = max(1, math.ceil(fraction * row_energy.size))
+    top = np.partition(row_energy, row_energy.size - k)[-k:]
+    return float(top.sum() / total)
+
+
+@dataclass(frozen=True)
+class TensorMetrics:
+    """Everything measured about one tensor's delta B - A. All fields are JSON-safe."""
+
+    shape: tuple[int, ...]
+    dtype_a: str
+    dtype_b: str
+    norm_a: float
+    norm_b: float
+    abs_delta: float  # ||B - A||_F
+    rel_delta: float | None  # ||B - A||_F / ||A||_F; None when ||A|| == 0
+    from_zero: bool  # A is exactly zero and B is not
+    erank: float | None  # entropy effective rank of B - A (matrices only)
+    erank_random: float | None  # same for a Gaussian matrix of this shape
+    r90: int | None
+    rank_dims: int | None  # min(rows, cols): the largest possible rank
+    top_row_share: float | None
+    floor: float  # dtype rounding floor on rel_delta
+    control: float | None  # optional reference scale on rel_delta
+    status: str  # see noise.assess
+    rank_label: str  # "low-rank" | "dense" | "n/a"
+    concentration_label: str  # "concentrated" | "spread" | "n/a"
+
+    @property
+    def significant(self) -> bool:
+        return self.status in noise.SIGNIFICANT_STATUSES
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["shape"] = list(self.shape)
+        return data
+
+
+def compute_tensor_metrics(
+    a: np.ndarray,
+    b: np.ndarray,
+    dtype_a: str,
+    dtype_b: str,
+    *,
+    control: float | None = None,
+    chunk_elements: int = DEFAULT_CHUNK_ELEMENTS,
+) -> TensorMetrics:
+    """Measure the delta between two float32 tensors of the same shape.
+
+    ``dtype_a``/``dtype_b`` are the *stored* dtypes (they set the rounding floor).
+    Raises ValueError for mismatched shapes or non-finite values.
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"shape mismatch: {a.shape} vs {b.shape}")
+    d = np.subtract(b, a, dtype=np.float32)
+
+    ss_a = sum_squares(a, chunk_elements)
+    ss_b = sum_squares(b, chunk_elements)
+    ss_d = sum_squares(d, chunk_elements)
+    if not all(math.isfinite(v) for v in (ss_a, ss_b, ss_d)):
+        raise ValueError("tensor contains NaN or inf values")
+
+    norm_a, norm_b, abs_delta = math.sqrt(ss_a), math.sqrt(ss_b), math.sqrt(ss_d)
+    rel_delta = abs_delta / norm_a if norm_a > 0.0 else (0.0 if abs_delta == 0.0 else None)
+
+    erank = erank_random = None
+    r90 = rank_dims = None
+    if d.ndim >= 2 and abs_delta > 0.0:
+        matrix = d.reshape(d.shape[0], -1)
+        rows, cols = matrix.shape
+        if min(rows, cols) > 1:
+            sv = gram_singular_values(matrix, chunk_elements)
+            erank = entropy_effective_rank(sv)
+            r90 = energy_rank(sv)
+            rank_dims = min(rows, cols)
+            erank_random = random_erank_ratio(rank_dims, max(rows, cols)) * rank_dims
+
+    share = top_row_share(d, chunk_elements=chunk_elements) if abs_delta > 0.0 else None
+    n_rows = d.shape[0] if d.ndim >= 1 else 0
+    floor = noise.dtype_floor(dtype_a, dtype_b)
+
+    return TensorMetrics(
+        shape=tuple(int(s) for s in a.shape),
+        dtype_a=dtype_a,
+        dtype_b=dtype_b,
+        norm_a=norm_a,
+        norm_b=norm_b,
+        abs_delta=abs_delta,
+        rel_delta=rel_delta,
+        from_zero=norm_a == 0.0 and abs_delta > 0.0,
+        erank=erank,
+        erank_random=erank_random,
+        r90=r90,
+        rank_dims=rank_dims,
+        top_row_share=share,
+        floor=floor,
+        control=control,
+        status=noise.assess(rel_delta, abs_delta, floor, control),
+        rank_label=noise.rank_label(erank, erank_random),
+        concentration_label=noise.concentration_label(share, n_rows),
+    )
