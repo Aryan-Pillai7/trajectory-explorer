@@ -1,12 +1,13 @@
 """Render a TrajectoryResult as one self-contained, offline HTML page with inline SVG.
 
 Same rules as the pair report (report.py): no JavaScript, no external requests, escaped text,
-light/dark/print styles. The heatmap uses ONE log-spaced colour scale for every interval
-(the same validated blue ramp), so columns are comparable. The line chart uses the validated
-categorical palette in fixed slot order (dataviz validator: all adjacent checks pass in both
-modes; three light slots are under 3:1 contrast, so direct labels and the interval table are
-the required relief), with a different marker and dash per series so identity never rests on
-colour alone.
+light/dark/print styles. The heatmap has two panels (weight matrices, vectors), each with its
+own log-spaced colour scale fixed across every interval (the same validated blue ramp), so
+columns within a panel are comparable; the panels are not comparable with each other (D46).
+The line chart uses the validated categorical palette in fixed slot order (dataviz validator:
+all adjacent checks pass in both modes; three light slots are under 3:1 contrast, so direct
+labels and the interval table are the required relief), with a different marker and dash per
+series so identity never rests on colour alone.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from trajectory_explorer.report import (
     BASE_CSS,
     COMPONENT_LABELS,
     N_BINS,
+    PANEL_NOTE,
+    PANEL_TITLES,
     STATUS_TEXT,
     _bin,
     pct,
@@ -143,12 +146,13 @@ def summary_sentence(result: TrajectoryResult) -> tuple[bool, str]:
 _LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP, _LAYER_GAP = 170, 92, 40, 16, 2, 6
 
 
-def _global_edges(result: TrajectoryResult) -> list[float] | None:
+def _global_edges(result: TrajectoryResult, kind: str) -> list[float] | None:
+    """One scale per kind, fixed across ALL intervals so columns stay comparable (D37, D46)."""
     values = [
         g.rel_delta
         for r in result.intervals
         for g in r.groups
-        if g.status == noise.SIGNIFICANT and g.rel_delta
+        if g.kind == kind and g.status == noise.SIGNIFICANT and g.rel_delta
     ]
     if not values:
         return None
@@ -159,10 +163,24 @@ def _global_edges(result: TrajectoryResult) -> list[float] | None:
 
 
 def render_heatmap(result: TrajectoryResult) -> str:
-    rows = row_keys(result)
+    """Two panels, matrices then vectors, each with its own fixed scale (D46)."""
+    parts = [f'<p class="meta">{PANEL_NOTE}</p>']
+    for kind in ("matrix", "vector"):
+        rows = [k for k in row_keys(result) if k[2] == kind]
+        if rows:
+            parts.append(
+                f'<h3 class="panel">{PANEL_TITLES[kind]}</h3>' + _heatmap_panel(result, rows, kind)
+            )
+    return "".join(parts)
+
+
+def _heatmap_panel(
+    result: TrajectoryResult, rows: list[tuple[int | None, str, str]], kind: str
+) -> str:
     labels = result.interval_labels()
     prefix = "steps " if result.has_steps else ""
-    edges = _global_edges(result)
+    edges = _global_edges(result, kind)
+    hatch = f"t-hatch-{kind}"
     lookup = {
         (i, g.layer, g.component, g.kind): g
         for i, r in enumerate(result.intervals)
@@ -200,7 +218,7 @@ def render_heatmap(result: TrajectoryResult) -> str:
             elif g.status == noise.FROM_ZERO:
                 cls, fill = f"sig bin{N_BINS - 1}", ""
             else:
-                cls, fill = f"muted {g.status}", ' fill="url(#t-hatch)"'
+                cls, fill = f"muted {g.status}", f' fill="url(#{hatch})"'
             reason = STATUS_TEXT.get(g.status, g.status)
             if result.intervals[j].identical:
                 reason = "no change: the two files are byte-identical"
@@ -216,18 +234,22 @@ def render_heatmap(result: TrajectoryResult) -> str:
                 f'<g class="cell {cls}"><title>{escape(tip)}</title><rect x="{x}" y="{y}" '
                 f'width="{_CELL_W}" height="{_CELL_H}" rx="2"{fill}/></g>'
             )
-    n_sig = sum(1 for r in result.intervals for g in r.groups if g.significant)
-    n_all = sum(len(r.groups) for r in result.intervals)
+    n_sig = sum(1 for r in result.intervals for g in r.groups if g.significant and g.kind == kind)
+    n_all = sum(1 for r in result.intervals for g in r.groups if g.kind == kind)
     aria = (
         "Heatmap of relative change per layer, component and interval: "
         f"{n_sig} of {n_all} cells above the noise floor."
     )
     return (
-        f'<svg class="traj-heatmap" viewBox="0 0 {width} {height}" width="{width}" role="img" '
-        f'aria-label="{escape(aria)}"><defs><pattern id="t-hatch" width="6" height="6" '
+        f'<svg class="traj-heatmap" id="t-heatmap-{kind}" viewBox="0 0 {width} {height}" '
+        f'width="{width}" role="img" aria-label="{escape(PANEL_TITLES[kind] + ": " + aria)}">'
+        f'<defs><pattern id="{hatch}" width="6" height="6" '
         'patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" '
         'class="hatch-bg"/><line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern>'
-        "</defs>" + "".join(parts) + "</svg>" + bin_legend(edges)
+        "</defs>"
+        + "".join(parts)
+        + "</svg>"
+        + bin_legend(edges, f"t-hatch-key-{kind}", PANEL_TITLES[kind])
     )
 
 
@@ -522,8 +544,8 @@ $css</style>
 
 <section id="heatmap">
 <h2>Where and when the model changed: (layer, component) &times; interval</h2>
-<p class="meta">Relative change ||&Delta;W|| / ||W|| per cell, one colour scale for all
-intervals. Hover a cell for exact numbers.</p>
+<p class="meta">Relative change ||&Delta;W|| / ||W|| per cell. Each panel's colour scale is fixed
+across all intervals, so columns within a panel are comparable.</p>
 <div class="scroll">$heatmap</div>
 </section>
 

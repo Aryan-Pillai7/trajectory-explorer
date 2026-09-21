@@ -157,16 +157,38 @@ _CELL = Template(
 )
 
 
+PANEL_TITLES = {"matrix": "Weight matrices", "vector": "Vectors (biases, norm scales)"}
+PANEL_NOTE = (
+    "Each panel has its own colour scale: colours are not comparable between the matrices "
+    "panel and the vectors panel. Hover a cell for exact numbers."
+)
+
+
 def render_heatmap(result: DiffResult) -> str:
-    groups = result.groups
+    """Two panels, matrices then vectors, each with its own log-bin scale and legend (D46)."""
+    parts = [f'<p class="meta">{PANEL_NOTE}</p>']
+    present = {g.component for g in result.groups}
+    cols = [c for c in COMPONENTS if c in present]  # same columns in both panels
+    for kind in ("matrix", "vector"):
+        groups = tuple(g for g in result.groups if g.kind == kind)
+        if groups:
+            parts.append(
+                f'<h3 class="panel">{PANEL_TITLES[kind]}</h3>'
+                + _heatmap_panel(result, groups, cols, kind)
+            )
+    return "".join(parts)
+
+
+def _heatmap_panel(
+    result: DiffResult, groups: tuple[GroupMetrics, ...], cols: list[str], kind: str
+) -> str:
     rows = _rows(groups)
-    present = {g.component for g in groups}
-    cols = [c for c in COMPONENTS if c in present]
     edges = _bin_edges(groups)
     by_pos = {(_row_key(g), g.component): g for g in groups}
 
     width = _LABEL_W + len(cols) * (_CELL_W + _GAP)
     height = _HEAD_H + len(rows) * (_CELL_H + _GAP)
+    hatch = f"hatch-{kind}"
     parts = []
     for j, comp in enumerate(cols):
         x = _LABEL_W + j * (_CELL_W + _GAP) + _CELL_W / 2
@@ -188,7 +210,7 @@ def render_heatmap(result: DiffResult) -> str:
             elif g.status == noise.FROM_ZERO:
                 cls, fill, text = f"sig bin{N_BINS - 1}", "", "from 0"
             else:
-                cls, fill, text = f"muted {g.status}", ' fill="url(#hatch)"', ""
+                cls, fill, text = f"muted {g.status}", f' fill="url(#{hatch})"', ""
             parts.append(
                 _CELL.substitute(
                     cls=cls,
@@ -205,22 +227,22 @@ def render_heatmap(result: DiffResult) -> str:
             )
     n_sig = sum(1 for g in groups if g.significant)
     aria = (
-        f"Heatmap of relative change by layer and component: {n_sig} of {len(groups)} cells "
-        "above the noise floor."
+        f"{PANEL_TITLES[kind]}: heatmap of relative change by layer and component, {n_sig} of "
+        f"{len(groups)} cells above the noise floor."
     )
     return (
-        f'<svg class="heatmap" viewBox="0 0 {width} {height}" width="{width}" role="img" '
-        f'aria-label="{escape(aria)}">'
-        '<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" '
+        f'<svg class="heatmap" id="heatmap-{kind}" viewBox="0 0 {width} {height}" '
+        f'width="{width}" role="img" aria-label="{escape(aria)}">'
+        f'<defs><pattern id="{hatch}" width="6" height="6" patternUnits="userSpaceOnUse" '
         'patternTransform="rotate(45)"><rect width="6" height="6" class="hatch-bg"/>'
         '<line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern></defs>'
         + "".join(parts)
         + "</svg>"
-        + _legend(edges)
+        + _legend(edges, f"hatch-key-{kind}", PANEL_TITLES[kind])
     )
 
 
-def _legend(edges: list[float] | None) -> str:
+def _legend(edges: list[float] | None, key_id: str = "hatch-key", title: str = "") -> str:
     items = []
     if edges:
         for i in range(N_BINS):
@@ -231,13 +253,13 @@ def _legend(edges: list[float] | None) -> str:
             )
     items.append(
         '<span class="key"><svg width="18" height="14" aria-hidden="true"><defs>'
-        '<pattern id="hatch-key" width="6" height="6" patternUnits="userSpaceOnUse" '
+        f'<pattern id="{key_id}" width="6" height="6" patternUnits="userSpaceOnUse" '
         'patternTransform="rotate(45)"><rect width="6" height="6" class="hatch-bg"/>'
         '<line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern></defs>'
-        '<rect width="18" height="14" rx="3" fill="url(#hatch-key)"/></svg>'
+        f'<rect width="18" height="14" rx="3" fill="url(#{key_id})"/></svg>'
         "at or below the noise floor / control, or unchanged</span>"
     )
-    scale = "Relative change per cell, log-spaced bins." if edges else ""
+    scale = f"{title} scale: relative change per cell, log-spaced bins." if edges else ""
     return f'<p class="legend">{scale} {"".join(items)}</p>'
 
 
@@ -563,6 +585,7 @@ tr.below_floor td, tr.below_control td, tr.no_change td { color: var(--muted); }
 details { margin-top: 12px; } summary { cursor: pointer; color: var(--ink-2); }
 dt { font-weight: 600; margin-top: 8px; } dd { margin: 0 0 0 16px; color: var(--ink-2); }
 h3 { font-size: 14px; margin: 14px 0 6px; }
+h3.panel { margin-top: 18px; }
 .sub { color: var(--muted); font-size: 11px; }
 footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 @media print {
@@ -611,7 +634,7 @@ B: <code>$b_label</code> ($b_path, sha256 $b_sha, $b_size)</p>
 <section id="heatmap">
 <h2>Where the model changed: layer &times; component</h2>
 <p class="meta">Relative change ||&Delta;W|| / ||W|| per cell, aggregated over its tensors by
-sums of squares. Hover a cell for exact numbers.</p>
+sums of squares.</p>
 <div class="scroll">$heatmap</div>
 </section>
 
