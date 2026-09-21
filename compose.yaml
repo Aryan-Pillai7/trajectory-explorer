@@ -1,0 +1,64 @@
+# One way to build, run, test and lint (works in PowerShell and bash):
+#   docker compose build
+#   docker compose run --rm te --help
+#   docker compose run --rm test
+#   docker compose run --rm lint
+#   docker compose run --rm format
+#
+# All generated data (checkpoints, HF cache, metrics, reports, temp files) goes to
+# TE_DATA_DIR on the host, mounted at /data. TE_DATA_DIR has no default on purpose:
+# a missing .env fails loudly instead of silently writing gigabytes somewhere else.
+name: trajectory-explorer
+
+x-data-mount: &data-mount
+  type: bind
+  source: ${TE_DATA_DIR:?TE_DATA_DIR is not set. Copy .env.example to .env and set TE_DATA_DIR to an existing folder.}
+  target: /data
+
+x-environment: &environment
+  TE_DATA_DIR: /data
+  HF_HOME: /data/hf
+  # Container-local on purpose: the Windows bind mount does not support unlinked
+  # temp files (tempfile.TemporaryFile fails there). Containers run with --rm, so
+  # /tmp is discarded after each run. Large files are written to /data explicitly.
+  TMPDIR: /tmp
+  HF_TOKEN: ${HF_TOKEN:-}
+
+# Shared settings for the dev-image services. Only `test` builds the image (parallel
+# builds of one tag collide); `lint` and `format` reuse it and never pull from a registry.
+x-dev: &dev
+  image: trajectory-explorer:dev
+  environment: *environment
+  volumes:
+    - *data-mount
+    # Live source: tests and lint see your working tree without a rebuild.
+    - type: bind
+      source: .
+      target: /app
+
+services:
+  te:
+    build:
+      context: .
+      target: runtime
+    image: trajectory-explorer:latest
+    environment: *environment
+    volumes:
+      - *data-mount
+
+  test:
+    <<: *dev
+    build:
+      context: .
+      target: dev
+    entrypoint: ["pytest", "-p", "no:cacheprovider"]
+
+  lint:
+    <<: *dev
+    pull_policy: never
+    entrypoint: ["sh", "-c", "ruff check . && ruff format --check ."]
+
+  format:
+    <<: *dev
+    pull_policy: never
+    entrypoint: ["sh", "-c", "ruff check --fix . && ruff format ."]
