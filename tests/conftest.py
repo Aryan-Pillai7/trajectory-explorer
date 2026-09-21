@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import struct
 from collections.abc import Callable, Mapping
+from html.parser import HTMLParser
 from pathlib import Path
 
 import numpy as np
@@ -103,6 +104,72 @@ def perturb(
         noise *= rel * np.linalg.norm(value) / np.linalg.norm(noise)
         out[name] = (value + noise).astype(np.float32)
     return out
+
+
+class ReportParser(HTMLParser):
+    """Collects the structure the tests check, using only the stdlib parser."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.section_ids: list[str] = []
+        self.sig_cells = 0
+        self.ranked_rows = 0  # rows of the default (significant-only) ranked table
+        self.banner = ""
+        self.external_refs: list[str] = []
+        self.forbidden_tags: list[str] = []
+        self._in_banner = False
+        self._section = ""
+        self._details_depth = 0
+        self._in_tbody = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        for value in a.values():
+            if value and ("http://" in value or "https://" in value):
+                self.external_refs.append(value)
+        if tag in {"script", "link", "img", "iframe", "object", "embed"}:
+            self.forbidden_tags.append(tag)
+        if a.get("id") == "summary":
+            self._in_banner = True
+        if tag == "section":
+            self._section = a.get("id", "")
+            self.section_ids.append(self._section)
+        if tag == "g" and "cell sig" in a.get("class", ""):
+            self.sig_cells += 1
+        if tag == "details":
+            self._details_depth += 1
+        if tag == "tbody":
+            self._in_tbody = True
+        if tag == "tr" and self._in_tbody and self._section == "ranked" and not self._details_depth:
+            self.ranked_rows += 1
+
+    def handle_endtag(self, tag):
+        if tag == "div" and self._in_banner:
+            self._in_banner = False
+        if tag == "details":
+            self._details_depth -= 1
+        if tag == "tbody":
+            self._in_tbody = False
+
+    def handle_data(self, data):
+        if self._in_banner:
+            self.banner += data
+
+
+def parse_report(html: str) -> ReportParser:
+    parser = ReportParser()
+    parser.feed(html)
+    parser.close()
+    return parser
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point TE_DATA_DIR at a temp folder so no test writes to the real data dir on D:."""
+    data = tmp_path / "data"
+    monkeypatch.setenv("TE_DATA_DIR", str(data))
+    monkeypatch.delenv("TE_HOST_DATA_DIR", raising=False)
+    return data
 
 
 @pytest.fixture

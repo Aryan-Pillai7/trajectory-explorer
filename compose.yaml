@@ -17,6 +17,8 @@ x-data-mount: &data-mount
 
 x-environment: &environment
   TE_DATA_DIR: /data
+  # Lets the CLI print where a /data path lives on the host (e.g. D:/...).
+  TE_HOST_DATA_DIR: ${TE_DATA_DIR}
   HF_HOME: /data/hf
   # Container-local on purpose: the Windows bind mount does not support unlinked
   # temp files (tempfile.TemporaryFile fails there). Containers run with --rm, so
