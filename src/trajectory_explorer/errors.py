@@ -41,14 +41,19 @@ class ArchitectureMismatch(TrajectoryExplorerError):
         shape_mismatches: Sequence[tuple[str, tuple[int, ...], tuple[int, ...]]],
         *,
         max_listed: int = 10,
+        header: str = "The two checkpoints do not have the same architecture.",
+        labels: tuple[str, str] = ("A", "B"),
     ) -> None:
+        self.header = header
+        self.labels = labels
         self.only_in_a = list(only_in_a)
         self.only_in_b = list(only_in_b)
         self.shape_mismatches = list(shape_mismatches)
         super().__init__(self._format(max_listed))
 
     def _format(self, max_listed: int) -> str:
-        lines = ["The two checkpoints do not have the same architecture."]
+        lines = [self.header]
+        la, lb = self.labels
 
         def listing(title: str, items: list[str]) -> None:
             if not items:
@@ -58,10 +63,10 @@ class ArchitectureMismatch(TrajectoryExplorerError):
             if len(items) > max_listed:
                 lines.append(f"  ... and {len(items) - max_listed} more")
 
-        listing("Only in A", self.only_in_a)
-        listing("Only in B", self.only_in_b)
+        listing(f"Only in {la}", self.only_in_a)
+        listing(f"Only in {lb}", self.only_in_b)
         listing(
             "Shape differs",
-            [f"{name}: A{list(sa)} vs B{list(sb)}" for name, sa, sb in self.shape_mismatches],
+            [f"{name}: {la}{list(sa)} vs {lb}{list(sb)}" for name, sa, sb in self.shape_mismatches],
         )
         return "\n".join(lines)
