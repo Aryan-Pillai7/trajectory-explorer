@@ -23,5 +23,6 @@ The build, run, test and lint commands are in the README. Before opening a pull 
 
 ## Commits
 
-Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`,
-`test:`, `build:`, `ci:`, `chore:`, `refactor:`). Keep commits small and focused.
+Write short, plain commit messages in the imperative mood, with no type prefix. For example:
+"Add tensor reader for float32, float16 and bfloat16". Add a body only when the reason for a
+change isn't obvious. Keep commits small and focused.
