@@ -465,9 +465,11 @@ def render_noise_floor(result: DiffResult) -> str:
     return (
         "<p>The noise floor is the smallest relative change that storage rounding alone can "
         "produce. It is 3 &times; &radic;(u<sub>A</sub>&sup2; + u<sub>B</sub>&sup2;) / &radic;3, "
-        "where u is the unit roundoff of each tensor's stored format (float32 2<sup>-24</sup>, "
-        "float16 2<sup>-11</sup>, bfloat16 2<sup>-8</sup>). A change at or below it is "
-        "consistent with rounding only and is shown muted.</p>"
+        "where u is the unit roundoff of the precision each tensor really carries (float32 "
+        "2<sup>-24</sup>, float16 2<sup>-11</sup>, bfloat16 2<sup>-8</sup>): its stored format, "
+        "except that a float32 tensor whose values are all exact float16 numbers in both "
+        "checkpoints counts as float16. A change at or below it is consistent with rounding "
+        "only and is shown muted.</p>"
         f"<ul>{floors_html}</ul>{control}<p>{counts}"
         + (
             f" {len(result.skipped)} non-parameter buffer(s) (masks, rotary tables) were skipped."
