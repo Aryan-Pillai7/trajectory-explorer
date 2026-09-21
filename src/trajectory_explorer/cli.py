@@ -123,18 +123,43 @@ def _duration(seconds: float) -> str:
 
 
 def planned_downloads(
-    pairs: Sequence[tuple[CheckpointSource, CheckpointSource]], cache_dir: Path | None
+    pairs: Sequence[tuple[CheckpointSource, CheckpointSource]],
+    cache_dir: Path | None,
+    store: CheckpointStore,
 ) -> list[HubSource]:
-    """Hub files these pairs will actually download, in the order the engine needs them.
+    """Hub files these pairs will really download, in order, counting re-downloads.
 
-    Pairs that are metrics-cache hits need no files; byte-identical pairs need only A.
+    Pairs that are metrics-cache hits need no files; byte-identical pairs need only A. The
+    store's behaviour is replayed (D45): within a pair, stored files are pinned first; a
+    download evicts the least recently used unpinned file. So a file that is stored now but
+    evicted before its turn is counted when it is downloaded again.
     """
-    needed = [source for a, b in pairs for source in files_needed(a, b, cache_dir)]
+    on_disk = list(store.lru_order())  # least recently used first
+    fresh: set[Path] = set()  # stored content that matches the Hub (checked once per path)
     pending: list[HubSource] = []
-    for source in needed:
-        new = all(p.info.path != source.info.path for p in pending)
-        if isinstance(source, HubSource) and source.needs_download() and new:
-            pending.append(source)
+    for a, b in pairs:
+        hub_sources = [s for s in files_needed(a, b, cache_dir) if isinstance(s, HubSource)]
+        pinned: set[Path] = set()
+        # Same order as the engine: files still on disk (in the replay) are pinned first.
+        for source in sorted(
+            hub_sources, key=lambda s: store.path_for(s.remote.spec) not in on_disk
+        ):
+            path = store.path_for(source.remote.spec)
+            if path in on_disk and (path in fresh or store.lookup(source.remote) is not None):
+                fresh.add(path)
+                on_disk.remove(path)
+                on_disk.append(path)  # used now: most recent
+            else:
+                if path in on_disk:
+                    on_disk.remove(path)  # stale content: replaced
+                while len(on_disk) >= store.max_checkpoints:
+                    victim = next(p for p in on_disk if p not in pinned)
+                    on_disk.remove(victim)
+                    fresh.discard(victim)
+                on_disk.append(path)
+                fresh.add(path)
+                pending.append(source)
+            pinned.add(path)
     return pending
 
 
@@ -207,7 +232,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         and control[0].info.sha256 != control[1].info.sha256
     ):
         pairs.append(control)  # the engine skips the control for an identical main pair
-    download_guard(planned_downloads(pairs, cache_dir), yes=args.yes)
+    download_guard(planned_downloads(pairs, cache_dir, store), yes=args.yes)
     result = diff_checkpoints(a, b, DiffOptions(cache_dir=cache_dir, control=control))
 
     _write_outputs(args, render_html(result), result.to_json(), default_report_path(result))
@@ -286,7 +311,7 @@ def cmd_trajectory(args: argparse.Namespace) -> int:
     sources = [resolve(spec, store) for spec in specs]
     cache_dir = _cache_dir()
     pairs = list(itertools.pairwise(sources))
-    download_guard(planned_downloads(pairs, cache_dir), yes=args.yes)
+    download_guard(planned_downloads(pairs, cache_dir, store), yes=args.yes)
     result = run_trajectory(sources, cache_dir)
 
     html = render_trajectory_html(result)

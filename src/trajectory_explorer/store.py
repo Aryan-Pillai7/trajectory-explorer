@@ -78,6 +78,12 @@ class CheckpointStore:
             p for p in self.root.rglob(hub.FILENAME) if p.is_file() and self._read_meta(p)
         )
 
+    def lru_order(self) -> list[Path]:
+        """Stored checkpoints, least recently used first (the order eviction uses)."""
+        return sorted(
+            self.complete(), key=lambda p: (self._read_meta(p) or {}).get("last_used_ns", 0)
+        )
+
     def lookup(self, remote: RemoteFile) -> Path | None:
         """The stored file for this exact content, or None."""
         path = self.path_for(remote.spec)

@@ -20,7 +20,7 @@ import math
 import os
 import time
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -201,6 +201,12 @@ def local_source(path: str | Path) -> LocalSource:
     return LocalSource(path, info)
 
 
+def _needs_download(source: CheckpointSource) -> bool:
+    """False for local files and for Hub files already in the store."""
+    check = getattr(source, "needs_download", None)
+    return bool(check()) if callable(check) else False
+
+
 def _as_source(item: Any) -> CheckpointSource:
     return local_source(item) if isinstance(item, str | Path) else item
 
@@ -275,12 +281,14 @@ def _measure_pair(
         log.info("Metrics cache miss: computing %s vs %s", a.info.label, b.info.label)
 
     measured: dict[str, TensorMeasurement] = {}
-    with (
-        a.fetch() as path_a,
-        b.fetch() as path_b,
-        Checkpoint(path_a) as ca,
-        Checkpoint(path_b) as cb,
-    ):
+    with ExitStack() as stack:
+        # Pin files that are already stored before fetching any that must be downloaded, so
+        # making room for a download can never evict the other half of this pair (D45).
+        paths: dict[int, Path] = {}
+        for i in sorted((0, 1), key=lambda i: _needs_download((a, b)[i])):
+            paths[i] = stack.enter_context((a, b)[i].fetch())
+        ca = stack.enter_context(Checkpoint(paths[0]))
+        cb = stack.enter_context(Checkpoint(paths[1]))
         start = time.perf_counter()
         specs_a, specs_b = ca.specs(), cb.specs()
         names = check_compatible(specs_a, specs_b)
