@@ -108,7 +108,7 @@ def test_hub_errors_are_clear_input_errors(case, message, fake_hub, rng, tmp_pat
         fetch_metadata(spec)
     assert exc.value.exit_code == 4
     if case == "bin_only":
-        assert "D1" in str(exc.value)
+        assert "Only safetensors checkpoints are supported" in str(exc.value)
 
 
 @pytest.mark.integration

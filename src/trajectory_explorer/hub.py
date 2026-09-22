@@ -149,8 +149,8 @@ def fetch_metadata(spec: HubSpec, *, timeout: float | None = None) -> RemoteFile
         raise InputError(
             f"{spec} has no {FILENAME}"
             + (" (it only ships pytorch_model.bin)" if only_bin else "")
-            + ". Converting .bin checkpoints needs a one-time torch conversion step (the D1 "
-            "contingency), which is not built."
+            + ". Only safetensors checkpoints are supported; converting a .bin file needs torch, "
+            "which this tool does not include."
         )
     lfs = entry.get("lfs") or {}
     sha, size = str(lfs.get("oid", "")), lfs.get("size", entry.get("size"))
