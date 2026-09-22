@@ -230,5 +230,6 @@ __marimo__/
 # accidental copies of weights, metrics or reports inside the working tree.
 /data/
 *.safetensors
+*.safetensors.part
 *.bin
 /reports/
