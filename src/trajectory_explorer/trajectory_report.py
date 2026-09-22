@@ -91,7 +91,7 @@ svg.lines { max-width: 100%; height: auto; font-size: 12px; }
 .end-label { fill: var(--ink); }
 .floor-line { stroke: var(--muted); stroke-width: 1; }
 .col-head { fill: var(--ink-2); font-size: 11px; }
-svg.traj-heatmap { font-size: 11px; }
+svg.traj-heatmap { font-size: 11px; height: auto; display: block; }
 """
 )
 
@@ -143,7 +143,22 @@ def summary_sentence(result: TrajectoryResult) -> tuple[bool, str]:
 
 
 # -- heatmap ------------------------------------------------------------------------------
-_LABEL_W, _HEAD_H, _CELL_W, _CELL_H, _GAP, _LAYER_GAP = 170, 92, 40, 16, 2, 6
+_LABEL_W, _HEAD_H, _CELL_H, _GAP, _LAYER_GAP, _RIGHT_PAD = 170, 92, 16, 2, 6, 60
+# Width budget: the usable width inside a report section at a 1280 px viewport (main is at
+# most 1100 px, minus page and section padding). Cells shrink to fit it; below MIN_CELL_W a
+# cell is too small to read or hover reliably, so the panel keeps MIN_CELL_W and scrolls.
+# With these numbers everything fits up to 42 intervals; from 43 on the panel scrolls (D49).
+_TARGET_W, _MAX_CELL_W, _MIN_CELL_W = 1000, 40.0, 16.0
+
+
+def heatmap_geometry(n_intervals: int) -> tuple[float, float, bool]:
+    """(cell width, SVG width, scrolls?) for a panel with this many columns."""
+    fit = (_TARGET_W - _LABEL_W - _RIGHT_PAD) / max(n_intervals, 1) - _GAP
+    cell = min(_MAX_CELL_W, fit)
+    scrolls = cell < _MIN_CELL_W
+    if scrolls:
+        cell = _MIN_CELL_W
+    return cell, _LABEL_W + n_intervals * (cell + _GAP) + _RIGHT_PAD, scrolls
 
 
 def _global_edges(result: TrajectoryResult, kind: str) -> list[float] | None:
@@ -193,15 +208,15 @@ def _heatmap_panel(
         ys.append(y)
         y += _CELL_H + _GAP
         previous_layer = layer
-    width = _LABEL_W + len(labels) * (_CELL_W + _GAP) + 60
+    cell_w, width, scrolls = heatmap_geometry(len(labels))
     height = y + 4
 
     parts = []
     for j, label in enumerate(labels):
-        x = _LABEL_W + j * (_CELL_W + _GAP) + _CELL_W / 2
+        x = _LABEL_W + j * (cell_w + _GAP) + cell_w / 2
         parts.append(
-            f'<text class="col-head" x="{x}" y="{_HEAD_H - 6}" '
-            f'transform="rotate(-50 {x} {_HEAD_H - 6})">{escape(label)}</text>'
+            f'<text class="col-head" x="{x:.1f}" y="{_HEAD_H - 6}" '
+            f'transform="rotate(-50 {x:.1f} {_HEAD_H - 6})">{escape(label)}</text>'
         )
     for (layer, comp, kind), y in zip(rows, ys, strict=True):
         parts.append(
@@ -212,7 +227,7 @@ def _heatmap_panel(
             g = lookup.get((j, layer, comp, kind))
             if g is None:
                 continue
-            x = _LABEL_W + j * (_CELL_W + _GAP)
+            x = _LABEL_W + j * (cell_w + _GAP)
             if g.status == noise.SIGNIFICANT and edges and g.rel_delta:
                 cls, fill = f"sig bin{_bin(g.rel_delta, edges)}", ""
             elif g.status == noise.FROM_ZERO:
@@ -231,8 +246,8 @@ def _heatmap_panel(
             if shares:
                 tip += "\n" + "\n".join(shares)
             parts.append(
-                f'<g class="cell {cls}"><title>{escape(tip)}</title><rect x="{x}" y="{y}" '
-                f'width="{_CELL_W}" height="{_CELL_H}" rx="2"{fill}/></g>'
+                f'<g class="cell {cls}"><title>{escape(tip)}</title><rect x="{x:.1f}" y="{y}" '
+                f'width="{cell_w:.1f}" height="{_CELL_H}" rx="2"{fill}/></g>'
             )
     n_sig = sum(1 for r in result.intervals for g in r.groups if g.significant and g.kind == kind)
     n_all = sum(1 for r in result.intervals for g in r.groups if g.kind == kind)
@@ -241,8 +256,15 @@ def _heatmap_panel(
         f"{n_sig} of {n_all} cells above the noise floor."
     )
     return (
-        f'<svg class="traj-heatmap" id="t-heatmap-{kind}" viewBox="0 0 {width} {height}" '
-        f'width="{width}" role="img" aria-label="{escape(PANEL_TITLES[kind] + ": " + aria)}">'
+        f'<svg class="traj-heatmap" id="t-heatmap-{kind}" viewBox="0 0 {width:.0f} {height}" '
+        # Fits: scale to the container (never wider than drawn). Too many columns: keep a
+        # readable minimum width and let the surrounding .scroll box scroll sideways.
+        + (
+            f'width="{width:.0f}" style="min-width: {width:.0f}px" '
+            if scrolls
+            else f'width="100%" style="max-width: {width:.0f}px" '
+        )
+        + f'role="img" aria-label="{escape(PANEL_TITLES[kind] + ": " + aria)}">'
         f'<defs><pattern id="{hatch}" width="6" height="6" '
         'patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" '
         'class="hatch-bg"/><line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern>'
