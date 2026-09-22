@@ -23,6 +23,7 @@ from trajectory_explorer.diff import DiffResult, GroupMetrics, tensor_kind
 from trajectory_explorer.metrics import TensorMetrics
 
 N_BINS = 5
+FROM_ZERO_MARK = "0→"  # "0->" drawn on from-zero cells (D50)
 COMPONENT_LABELS = {
     "embed": "embedding",
     "attn_qkv": "attn QKV",
@@ -207,8 +208,8 @@ def _heatmap_panel(
             x = _LABEL_W + j * (_CELL_W + _GAP)
             if g.status == noise.SIGNIFICANT and edges and g.rel_delta:
                 cls, fill, text = f"sig bin{_bin(g.rel_delta, edges)}", "", pct(g.rel_delta)
-            elif g.status == noise.FROM_ZERO:
-                cls, fill, text = f"sig bin{N_BINS - 1}", "", "from 0"
+            elif g.status == noise.FROM_ZERO:  # own style, never the top bin (D50)
+                cls, fill, text = "fromzero", "", FROM_ZERO_MARK
             else:
                 cls, fill, text = f"muted {g.status}", f' fill="url(#{hatch})"', ""
             parts.append(
@@ -251,6 +252,12 @@ def _legend(edges: list[float] | None, key_id: str = "hatch-key", title: str = "
                 f'<rect class="cell sig bin{i}" width="18" height="14" rx="3"/></svg>'
                 f"{pct(edges[i])} &ndash; {pct(edges[i + 1])}</span>"
             )
+    items.append(
+        '<span class="key"><svg width="26" height="14" aria-hidden="true">'
+        '<g class="cell fromzero"><rect x="1" y="1" width="24" height="12" rx="3"/>'
+        f'<text x="13" y="11" class="cell-text">{FROM_ZERO_MARK}</text></g></svg>'
+        "moved away from exactly zero (no relative change exists)</span>"
+    )
     items.append(
         '<span class="key"><svg width="18" height="14" aria-hidden="true"><defs>'
         f'<pattern id="{key_id}" width="6" height="6" patternUnits="userSpaceOnUse" '
@@ -513,8 +520,10 @@ embedding: a small set of tokens). Weight matrices only.</dd>
 <dt>spread out</dt><dd>The change is distributed over many rows. Weight matrices only; for
 vectors (biases, norm scales) the report shows the share of the change held by the top 5% of
 elements as a number instead of a label.</dd>
-<dt>from zero</dt><dd>The tensor was exactly zero in A (for example a bias at initialisation),
-so a relative change is undefined; any non-zero value in B counts as a real change.</dd>
+<dt>from zero (0&#8594;)</dt><dd>The tensor was exactly zero in A (for example a bias at
+initialisation), so a relative change is undefined; any non-zero value in B counts as a real
+change. These cells are drawn as outlined boxes marked 0&#8594;, not on the colour scale, so
+they are never mistaken for the largest measured change.</dd>
 <dt>effective rank, r90</dt><dd>Effective rank is exp(entropy) of the normalised singular
 values: k equal directions give exactly k. r90 is how many directions hold 90% of the
 change.</dd>
@@ -570,6 +579,9 @@ svg.heatmap { max-width: 100%; height: auto; font-size: 12px; }
 .cell.bin2 rect, rect.bin2 { fill: var(--b2); } .cell.bin2 .cell-text { fill: var(--t2); }
 .cell.bin3 rect, rect.bin3 { fill: var(--b3); } .cell.bin3 .cell-text { fill: var(--t3); }
 .cell.bin4 rect, rect.bin4 { fill: var(--b4); } .cell.bin4 .cell-text { fill: var(--t4); }
+.cell.fromzero rect { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5;
+  stroke-dasharray: 3 2; }
+.cell.fromzero .cell-text { fill: var(--ink); font-weight: 600; }
 .hatch-bg { fill: var(--hatch-bg); } .hatch-line { stroke: var(--hatch-line); stroke-width: 2; }
 .legend { color: var(--ink-2); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 16px;
   align-items: center; }

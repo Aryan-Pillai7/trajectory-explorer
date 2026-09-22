@@ -24,6 +24,7 @@ from trajectory_explorer.diff import GroupMetrics
 from trajectory_explorer.report import (
     BASE_CSS,
     COMPONENT_LABELS,
+    FROM_ZERO_MARK,
     N_BINS,
     PANEL_NOTE,
     PANEL_TITLES,
@@ -92,6 +93,7 @@ svg.lines { max-width: 100%; height: auto; font-size: 12px; }
 .floor-line { stroke: var(--muted); stroke-width: 1; }
 .col-head { fill: var(--ink-2); font-size: 11px; }
 svg.traj-heatmap { font-size: 11px; height: auto; display: block; }
+svg.traj-heatmap .cell-text.fz { font-size: 10px; }
 """
 )
 
@@ -230,8 +232,8 @@ def _heatmap_panel(
             x = _LABEL_W + j * (cell_w + _GAP)
             if g.status == noise.SIGNIFICANT and edges and g.rel_delta:
                 cls, fill = f"sig bin{_bin(g.rel_delta, edges)}", ""
-            elif g.status == noise.FROM_ZERO:
-                cls, fill = f"sig bin{N_BINS - 1}", ""
+            elif g.status == noise.FROM_ZERO:  # own style, never the top bin (D50)
+                cls, fill = "fromzero", ""
             else:
                 cls, fill = f"muted {g.status}", f' fill="url(#{hatch})"'
             reason = STATUS_TEXT.get(g.status, g.status)
@@ -247,7 +249,14 @@ def _heatmap_panel(
                 tip += "\n" + "\n".join(shares)
             parts.append(
                 f'<g class="cell {cls}"><title>{escape(tip)}</title><rect x="{x:.1f}" y="{y}" '
-                f'width="{cell_w:.1f}" height="{_CELL_H}" rx="2"{fill}/></g>'
+                f'width="{cell_w:.1f}" height="{_CELL_H}" rx="2"{fill}/>'
+                + (
+                    f'<text x="{x + cell_w / 2:.1f}" y="{y + _CELL_H - 4}" '
+                    f'class="cell-text fz">{FROM_ZERO_MARK}</text>'
+                    if cls == "fromzero"
+                    else ""
+                )
+                + "</g>"
             )
     n_sig = sum(1 for r in result.intervals for g in r.groups if g.significant and g.kind == kind)
     n_all = sum(1 for r in result.intervals for g in r.groups if g.kind == kind)
