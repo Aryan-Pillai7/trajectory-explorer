@@ -80,6 +80,10 @@ def test_planted_changes_show_up_in_the_right_interval(tmp_path, rng):
     assert "all vectors</span>" in html
     assert html.count('class="end-label"') == 2  # only the two planted series have points
     assert "reference scale, not a null" in html
+    # The short version sits right under the banner, before the heatmap (first screen, D51).
+    note = html.index('id="reference-note"')
+    assert html.index('id="summary"') < note < html.index('id="heatmap"')
+    assert "Adjacent-step diffs are a reference scale, not\na null." in html[note : note + 200]
     assert report.external_refs == [] and report.forbidden_tags == []
 
 

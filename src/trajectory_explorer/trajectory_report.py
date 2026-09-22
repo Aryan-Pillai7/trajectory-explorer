@@ -94,6 +94,8 @@ svg.lines { max-width: 100%; height: auto; font-size: 12px; }
 .col-head { fill: var(--ink-2); font-size: 11px; }
 svg.traj-heatmap { font-size: 11px; height: auto; display: block; }
 svg.traj-heatmap .cell-text.fz { font-size: 10px; }
+.lead-note { margin: 10px 2px 0; color: var(--ink-2); font-size: 14px; }
+.lead-note a { color: inherit; }
 """
 )
 
@@ -572,6 +574,12 @@ $css</style>
 <h1>$title</h1>
 <p class="meta">$n_points checkpoints, $n_intervals adjacent intervals: $first &rarr; $last</p>
 <div id="summary" class="banner $banner_cls" role="status">$banner</div>
+<p id="reference-note" class="lead-note"><strong>Adjacent-step diffs are a reference scale, not
+a null.</strong> Each column compares two neighbouring checkpoints, and the model really learns
+between them, so a coloured cell shows how much changed in that interval, not that the change is
+unusual. Hatched cells are at or below the rounding floor; columns span different numbers of
+steps. More in <a href="#noise-floor">Noise floor</a> and
+<a href="#interval-lengths">Interval lengths</a>.</p>
 
 <section id="heatmap">
 <h2>Where and when the model changed: (layer, component) &times; interval</h2>
