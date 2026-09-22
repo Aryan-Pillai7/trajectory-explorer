@@ -127,7 +127,10 @@ def test_hub_trajectory_downloads_each_checkpoint_once_within_two_files(
     assert "Steps (5 of 5 step branches): 0, 1, 2, 4, 8" in err
     assert "Downloads needed: 5 file(s)" in err
     assert hub_steps.cdn_gets() == ["step0", "step1", "step2", "step4", "step8"]  # each once
-    assert max(on_disk) <= 2
+    # Right after a download the old file is still there (eviction waits for success, D52),
+    # so three are seen at that moment; after the run the store is back to two.
+    assert max(on_disk) == 3
+    assert len(list((isolated_data_dir / "checkpoints").rglob("model.safetensors"))) == 2
 
     # Everything is cached now: a rerun downloads and measures nothing.
     assert run(["trajectory", REPO, "--steps", "all"]) == 0

@@ -123,7 +123,7 @@ def test_rolling_store_limit_lru_pinning_and_stale_parts(fake_hub, rng, tmp_path
     def counting_download(remote, dest):
         nonlocal max_seen
         stats = hub.download(remote, dest)
-        max_seen = max(max_seen, len(store.complete()))
+        max_seen = max(max_seen, len(list(store.root.rglob("model.safetensors"))))
         return stats
 
     store = CheckpointStore(tmp_path / "ck", max_checkpoints=2, downloader=counting_download)
@@ -143,7 +143,49 @@ def test_rolling_store_limit_lru_pinning_and_stale_parts(fake_hub, rng, tmp_path
     with store.use(remotes["r2"]), store.use(remotes["r1"]):  # r2 pinned: r3 is evicted
         pass
     assert [p.parent.name for p in store.complete()] == ["r1", "r2"]
-    assert max_seen <= 2
+    # Eviction waits for the new file to be in place (D52): one extra file while the
+    # download finishes, never more, and back within the limit once use() returns.
+    assert max_seen == 3
+
+
+@pytest.mark.integration
+def test_failed_download_keeps_the_stored_files_and_a_later_success_evicts(fake_hub, rng, tmp_path):
+    base = neox_tensors(rng)
+    for i, rev in enumerate(("r1", "r2", "r3")):
+        fake_hub.add(REPO, rev, checkpoint_bytes(tmp_path, perturb(base, 0.01 * (i + 1), rng)))
+    remotes = {rev: fetch_metadata(HubSpec(REPO, rev)) for rev in ("r1", "r2", "r3")}
+    store = CheckpointStore(tmp_path / "ck", max_checkpoints=2)
+    with store.use(remotes["r1"]), store.use(remotes["r2"]):
+        pass
+
+    def stored_and_valid():
+        return {
+            p.parent.name: store.lookup(remotes[p.parent.name]) == p
+            and p.read_bytes() == fake_hub.files[(REPO, p.parent.name)]
+            for p in store.complete()
+        }
+
+    # r3 fails twice: its bytes fail verification, then the connection drops mid-body.
+    fake_hub.corrupt.add((REPO, "r3"))
+    with pytest.raises(InputError, match="failed verification"), store.use(remotes["r3"]):
+        pass
+    assert stored_and_valid() == {"r1": True, "r2": True}
+    fake_hub.corrupt.discard((REPO, "r3"))
+    fake_hub.drop_after[(REPO, "r3")] = 1000
+    with (
+        pytest.raises(InputError, match="Run the command again to resume"),
+        store.use(remotes["r3"]),
+    ):
+        pass
+    assert stored_and_valid() == {"r1": True, "r2": True}
+    part = store.path_for(HubSpec(REPO, "r3")).with_name("model.safetensors.part")
+    assert part.stat().st_size == 1000  # kept for the resume
+
+    # Now it succeeds, and only then is r1 (least recently used) evicted.
+    with store.use(remotes["r3"]) as p3:  # resumes from byte 1000
+        assert p3.read_bytes() == fake_hub.files[(REPO, "r3")]
+    assert stored_and_valid() == {"r2": True, "r3": True}
+    assert not part.exists()
 
 
 @pytest.mark.integration

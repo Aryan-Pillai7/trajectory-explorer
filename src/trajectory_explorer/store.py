@@ -3,8 +3,9 @@
 Layout: <root>/<org>/<name>/<revision>/model.safetensors plus a small checkpoint.json with
 the verified sha256, size and last-use time. Only files that were verified and renamed into
 place (hub.download) count; ``*.part`` files are resumed by the next download of the same
-revision or removed when room is needed. A checkpoint in use is pinned and never evicted;
-otherwise the least recently used one is evicted to make room for a new one.
+revision or removed before another revision downloads. A checkpoint in use is pinned and
+never evicted; otherwise the least recently used one is evicted once a new download has
+succeeded, so the store briefly holds N files plus the one being downloaded (D52).
 """
 
 from __future__ import annotations
@@ -101,21 +102,34 @@ class CheckpointStore:
             folder.rmdir()
             folder = folder.parent
 
-    def _make_room(self, incoming: Path) -> None:
-        # Stale partial downloads of other revisions: remove (only `incoming` gets resumed).
+    def _remove_stale_parts(self, incoming: Path) -> None:
+        """Partial downloads of other revisions are removed (only ``incoming`` gets resumed)."""
         if self.root.is_dir():
             for part in self.root.rglob(hub.FILENAME + ".part"):
                 if part.with_name(hub.FILENAME) != incoming:
                     log.info("Removing stale partial download %s", part)
                     part.unlink(missing_ok=True)
-        others = [p for p in self.complete() if p != incoming]
+
+    def _others(self, incoming: Path) -> list[Path]:
+        return [p for p in self.complete() if p != incoming]
+
+    def _check_room(self, incoming: Path) -> None:
+        """Before downloading: fail now if no stored file could be evicted afterwards."""
+        others = self._others(incoming)
+        if len(others) >= self.max_checkpoints and all(p in self._pinned for p in others):
+            raise InputError(
+                f"The checkpoint store holds at most {self.max_checkpoints} checkpoints and "
+                "all of them are in use; raise --max-checkpoints to compare more at once."
+            )
+
+    def _evict_to_limit(self, incoming: Path) -> None:
+        """After a successful download: evict least recently used unpinned files (D52)."""
+        others = self._others(incoming)
         while len(others) >= self.max_checkpoints:
             unpinned = [p for p in others if p not in self._pinned]
-            if not unpinned:
-                raise InputError(
-                    f"The checkpoint store holds at most {self.max_checkpoints} checkpoints and "
-                    "all of them are in use; raise --max-checkpoints to compare more at once."
-                )
+            if not unpinned:  # cannot happen after _check_room unless pins changed meanwhile
+                log.warning("Store above its limit: every other checkpoint is in use")
+                return
             victim = min(unpinned, key=lambda p: (self._read_meta(p) or {}).get("last_used_ns", 0))
             self._announce(
                 f"Evicting {victim.relative_to(self.root).parent} to stay within "
@@ -127,21 +141,30 @@ class CheckpointStore:
     # -- use ----------------------------------------------------------------------------
     @contextmanager
     def use(self, remote: RemoteFile) -> Iterator[Path]:
-        """Yield a verified local copy, downloading it if needed; pinned while in use."""
+        """Yield a verified local copy, downloading it if needed; pinned while in use.
+
+        A download goes to a .part file while every stored checkpoint stays in place; only
+        after it has been verified and renamed is the least recently used unpinned file
+        evicted. So a failed download never costs a stored file, at the price of briefly
+        holding max_checkpoints complete files plus the one being downloaded (D52).
+        """
         path = self.path_for(remote.spec)
         self._pinned.add(path)
         try:
             if self.lookup(remote) is None:
-                if path.is_file():  # same revision, different content (branch moved)
-                    self._remove(path)
-                self._make_room(path)
+                self._check_room(path)
+                self._remove_stale_parts(path)
                 self._announce(f"Downloading {remote.spec} ({remote.size / 1e6:.1f} MB)")
+                # Same revision with different content (a moved branch) is replaced by the
+                # rename at the end of the download, not deleted beforehand.
                 stats = self._download(remote, path)
+                self._write_meta(path, remote)
                 rate = stats.bytes_downloaded / stats.seconds / 1e6 if stats.seconds else 0.0
                 self._announce(
                     f"Downloaded {remote.spec} in {stats.seconds:.1f}s ({rate:.1f} MB/s)"
                     + (f", resumed from byte {stats.resumed_from:,}" if stats.resumed_from else "")
                 )
+                self._evict_to_limit(path)
             self._write_meta(path, remote)  # also refreshes last-use time
             yield path
         finally:
